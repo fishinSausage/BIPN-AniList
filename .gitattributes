@@ -1,0 +1,3 @@
+# Windows batch files need Windows line endings (CRLF) to run correctly.
+# This keeps them that way on every checkout, whatever each person's git settings are.
+*.bat text eol=crlf
