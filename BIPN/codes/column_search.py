@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Does one more, derived behavior help BIPN, and which cut-off is best?
 
-Started by search_recently_read.bat for the column recently_read. A derived behavior is
+Started by search_recently_read.bat for the column recently_read, and by search_<column>.bat
+for the other columns. A derived behavior is
 not a column of the CSVs: the converter works it out from the train csv with one number,
 the cut-off (data/AniList/data_process.py, DERIVED).
 
@@ -45,12 +46,18 @@ import sys
 #   sign       put before the percent in the tables ('>' for "share above ...")
 #   all_users  True = no sample step, every cut-off is run on all users. For a column that marks few rows:
 #              a run is then cheap, and the differences are too small to rank the cut-offs on a sample.
+#   count      True = the cut-offs are whole numbers given to the converter as they are, not percents
+#              (the tables and files still call them cutoff_percent, so the screen can read them)
 COLUMNS = {
     # the latest N percent of each user's rows
     'recently_read': {'percents': [10, 20, 30, 40, 50, 60, 70, 80, 90]},
     # the user likes more than N percent of the other titles by the author. The share is nearly always a
     # simple fraction (1 of 2, 1 of 3, all), so these five cut-offs are the ones that select different rows.
     'liked_author': {'percents': [0, 20, 40, 50, 90], 'sign': '>', 'all_users': True},
+    # unfinished titles of 20+ chapters of which the user has read at least N percent
+    'deep_read': {'percents': [10, 20, 30, 40, 50, 60, 70, 80, 90]},
+    # titles the user has read again at least N times; only 4 cut-offs, so each is run on all users
+    'reread': {'percents': [1, 2, 3, 4], 'count': True, 'all_users': True},
 }
 SELECT = 'ndcg@20'    # what main.py chooses the best epoch by (args.select_metric); the cut-offs are compared by it
 OTHER = 'recall@20'
@@ -91,6 +98,7 @@ class Search:
     def __init__(self, args):
         self.args, self.column = args, args.column
         self.sign = COLUMNS[args.column].get('sign', '')
+        self.unit = '' if COLUMNS[args.column].get('count') else '%'
         self.files = csv_files(args.files_json)
         self.rows = []   # one per finished run: {'step': 'sample' or 'all', 'percent': None or int, 'result': ...}
         self.candidates, self.best = [], None
@@ -98,13 +106,13 @@ class Search:
         self.best_json = os.path.join(ROOT, '%s_search_best.json' % self.column)
 
     def label(self, percent):
-        return 'like  (plain BIPN)' if percent is None else '+ %s %s%d%%' % (self.column, self.sign, percent)
+        return 'like  (plain BIPN)' if percent is None else '+ %s %s%d%s' % (self.column, self.sign, percent, self.unit)
 
     def convert(self, folder, percent, sample):
         """Converts the CSVs into folder; the converter skips it if it is already done."""
         command = [sys.executable, DATA_PROCESS, '--behaviors', 'like', '--out', folder]
         if percent is not None:
-            command += ['--extra', self.column, '--cutoff', repr(percent / 100.0)]
+            command += ['--extra', self.column, '--cutoff', repr(percent / 100.0 if self.unit else percent)]
         if sample < 1.0:
             command += ['--sample', repr(sample)]
         for part in PARTS:
@@ -233,7 +241,7 @@ def main():
             sys.exit('\nNo run with %s finished in step 1. Fix the error shown above and start this again.' % args.column)
         search.show()
         print('\nCandidates for step 2 (the best %d of step 1): %s'
-              % (len(search.candidates), ', '.join('%d%%' % p for p in search.candidates)), flush=True)
+              % (len(search.candidates), ', '.join('%d%s' % (p, search.unit) for p in search.candidates)), flush=True)
     else:
         print('%s cut-off search: plain BIPN and %d cut-offs on all users, device %s'
               % (args.column, len(percents), args.device), flush=True)
@@ -252,8 +260,9 @@ def main():
     else:
         best = ranked[0]['result']
         value = metric(best, 'validation', SELECT)
-        print(' Kept cut-off for %s: %s%d%%  (best on all users of the cut-offs %s)'
-              % (args.column, search.sign, search.best, ', '.join('%s%d%%' % (search.sign, p) for p in search.candidates)))
+        print(' Kept cut-off for %s: %s%d%s  (best on all users of the cut-offs %s)'
+              % (args.column, search.sign, search.best, search.unit,
+                 ', '.join('%s%d%s' % (search.sign, p, search.unit) for p in search.candidates)))
         if plain:
             base = metric(plain['result'], 'validation', SELECT)
             print(' validation %s %.4f against %.4f for plain BIPN (%+.4f)' % (SELECT, value, base, value - base))

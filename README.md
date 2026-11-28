@@ -46,3 +46,10 @@ To add a column:
 2. `BIPN/codes/column_search.py`: add the column and its cut-offs (in percent) to `COLUMNS`.
 3. `BIPN/scripts`: copy `search_recently_read.bat` and change `SEARCH_COLUMN` in the copy.
 4. `scripts/dashboard.py`: add the column to `SEARCH_COLUMNS` so that START.bat runs it.
+
+Two more columns have only their own start file in `BIPN/scripts` (START.bat does not run them):
+
+| column | a title gets the behavior when | cut-offs | start file |
+|---|---|---|---|
+| `deep_read` | status is CURRENT, PAUSED or DROPPED, it has at least 20 chapters, and `progress / chapters` is at least N percent | 10 ... 90 percent, sample first | `search_deep_read.bat` |
+| `reread` | `repeat` is at least N and status is not PLANNING | 1, 2, 3, 4 (times, not percent), all users | `search_reread.bat` |

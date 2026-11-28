@@ -8,6 +8,7 @@
     python data_process.py --behaviors like --out ../AniList_likes  # likes only: the plain BIPN baseline
     python data_process.py --behaviors like --extra recently_read --cutoff 0.3 --out ../AniList_recently_read_30
     python data_process.py --behaviors like --extra liked_author --cutoff 0.5 --out ../AniList_liked_author_50
+    python data_process.py --behaviors like --extra reread --cutoff 2 --out ../AniList_reread_2
 
 The CSVs are only read, never changed.
 
@@ -32,6 +33,11 @@ They are listed in DERIVED below; to add one, write its function there. So far:
                     title itself is left out, so its own like is not part of the behavior.
                     Authors are the staff of authors_json with a creator's role (story, art,
                     original story / creator, illustration), not letterers or translators.
+    deep_read       titles the user is reading or stopped reading (status CURRENT, PAUSED or
+                    DROPPED) that have at least 20 chapters and of which the user has read
+                    at least the cut-off share: progress / chapters >= cut-off.
+    reread          titles the user has read again at least cut-off times: repeat >= cut-off,
+                    status not PLANNING. Its cut-off is a whole number (1, 2, ...), not a share.
 codes/column_search.py searches the cut-off of a derived behavior.
 
 Evaluation, the same rules as the LightGCN baseline (LightGCN/preprocess.py):
@@ -121,15 +127,33 @@ def liked_author(rows, cutoff, info):
     return chosen
 
 
+DEEP_READ_STATUS = ('current', 'paused', 'dropped')   # deep_read: only titles the user has not finished
+DEEP_READ_MIN_CHAPTERS = 20                           # deep_read: shorter titles are left out
+
+
+def deep_read(rows, cutoff, info=None):
+    """Unfinished titles of at least 20 chapters of which the user has read at least the share cutoff (0..1)."""
+    return [t for t in rows if rows[t][0] in DEEP_READ_STATUS and rows[t][4] >= DEEP_READ_MIN_CHAPTERS
+            and rows[t][3] / rows[t][4] >= cutoff]
+
+
+def reread(rows, cutoff, info=None):
+    """Titles the user has read again at least cutoff times (1, 2, ...); planned titles are left out."""
+    return [t for t in rows if rows[t][0] != 'planning' and rows[t][5] >= cutoff]
+
+
 # Derived behaviors: name -> function(rows, cutoff, info) that returns the titles of one user that get
-# the behavior. rows is {title: (status behavior or None, rating behavior or None, updated_at)} of the
-# user's train rows; cutoff is the one number that codes/column_search.py searches; info holds what is
+# the behavior. rows is {title: (status behavior or None, rating behavior or None, updated_at, progress,
+# chapters, repeat)} of the user's train rows; cutoff is the one number that codes/column_search.py searches; info holds what is
 # known about the titles ({'authors': {title: author ids}}). Only the train csv may be used, never
 # validation or test, and a row's own like must not decide the row's own behavior.
 DERIVED = {
     'recently_read': recently_read,
     'liked_author': liked_author,
+    'deep_read': deep_read,
+    'reread': reread,
 }
+COUNT_CUTOFF = ('reread',)   # their cut-off is a whole number of at least 1; for the others it is a share from 0 to 1
 
 
 def listed_files(path):
@@ -207,6 +231,14 @@ def to_int(text):
         return int(number)
 
 
+def whole(text):
+    """progress, chapters or repeat as a whole number; blank or not a number is 0."""
+    try:
+        return int(float(text))
+    except (ValueError, OverflowError):
+        return 0
+
+
 def open_csv(path, needed):
     """Opens a CSV and returns (file, reader, positions of the needed columns, {column name: position})."""
     csv.field_size_limit(2 ** 31 - 1)
@@ -241,19 +273,20 @@ def check(path, column, other, short):
 
 
 def read_train(path):
-    """Returns {user: {title: (status behavior or None, rating behavior or None, updated_at)}}, titles, notes
-    and {title: author ids}.
+    """Returns {user: {title: (status behavior or None, rating behavior or None, updated_at, progress,
+    chapters, repeat)}}, titles, notes and {title: author ids}.
 
     Every row of the train csv is kept, also one without a behavior: the user has seen that title.
     """
     users, titles, authors = {}, {}, {}
     notes = {'rows': 0, 'unknown_status': 0, 'repeated_pairs': 0}
     other, short, t0 = collections.Counter(), 0, time.time()
-    needed = ['user_id', 'media_id', 'status', 'score_100', 'score_available', 'updated_at', TRAIN_LIKE_COL]
-    f, reader, (iu, im, ist, isc, ifl, iup, ilk), col = open_csv(path, needed)
+    needed = ['user_id', 'media_id', 'status', 'score_100', 'score_available', 'updated_at', TRAIN_LIKE_COL,
+              'progress', 'chapters', 'repeat']
+    f, reader, (iu, im, ist, isc, ifl, iup, ilk, ipr, ich, irp), col = open_csv(path, needed)
     ititle, iauthors = col.get('media_title'), col.get('authors_json')
     notes['authors_column'] = iauthors is not None
-    need = max(iu, im, ist, isc, ifl, iup, ilk) + 1
+    need = max(iu, im, ist, isc, ifl, iup, ilk, ipr, ich, irp) + 1
     with f:
         for row in reader:
             notes['rows'] += 1
@@ -284,16 +317,17 @@ def read_train(path):
                 updated = int(float(row[iup]))
             except ValueError:
                 updated = 0
+            counts = (whole(row[ipr]), whole(row[ich]), whole(row[irp]))
             entries = users.setdefault(user, {})
             if title in entries:                       # the same pair twice: the newer row counts,
                 notes['repeated_pairs'] += 1           # and it is a like if either row is
                 old = entries[title]
                 if old[2] >= updated:
-                    status, updated = old[0], old[2]
+                    status, updated, counts = old[0], old[2], old[3:]
                     rating = TARGET if TARGET in (rating, old[1]) else old[1]
                 elif old[1] == TARGET:
                     rating = TARGET
-            entries[title] = (status, rating, updated)
+            entries[title] = (status, rating, updated) + counts
             if title not in titles:
                 titles[title] = row[ititle].strip() if ititle is not None else ''
                 authors[title] = creators(row[iauthors]) if iauthors is not None and len(row) > iauthors else ()
@@ -395,7 +429,7 @@ def convert(paths, out_dir, sample, seed, behaviors, extra=None, cutoff=None):
             if chosen:
                 lists[extra][nu] = sorted(new_title[t] for t in chosen)
         for t in sorted(users[u]):
-            status, rating, _ = users[u][t]
+            status, rating = users[u][t][:2]
             for b in (status, rating):
                 if b in lists:
                     lists[b].setdefault(nu, []).append(new_title[t])
@@ -499,13 +533,17 @@ if __name__ == '__main__':
                         help='all = 6 status + 3 rating behaviors; like = likes only (the plain BIPN baseline)')
     parser.add_argument('--extra', choices=sorted(DERIVED),
                         help='one more behavior, derived from the train csv with --cutoff')
-    parser.add_argument('--cutoff', type=float, help='with --extra: its cut-off, from 0 to 1')
+    parser.add_argument('--cutoff', type=float, help='with --extra: its cut-off, from 0 to 1 '
+                                                     '(reread: a whole number, 1 or more)')
     parser.add_argument('--sample', type=float, default=1.0, help='fraction of users to keep, e.g. 0.1')
     parser.add_argument('--seed', type=int, default=2021)
     args = parser.parse_args()
     if not 0 < args.sample <= 1:
         sys.exit('ERROR: --sample must be between 0 and 1')
-    if args.extra and (args.cutoff is None or not 0 <= args.cutoff <= 1):
+    if args.extra in COUNT_CUTOFF:
+        if args.cutoff is None or args.cutoff < 1 or args.cutoff != int(args.cutoff):
+            sys.exit('ERROR: --extra %s needs --cutoff, a whole number of 1 or more' % args.extra)
+    elif args.extra and (args.cutoff is None or not 0 <= args.cutoff <= 1):
         sys.exit('ERROR: --extra needs --cutoff, from 0 to 1')
     files = pick_files({name: getattr(args, name) for name in PARTS}, reuse=args.sample < 1.0, files_json=args.files_json)
     convert(files, os.path.abspath(args.out), args.sample, args.seed, list(BEHAVIOR_SETS[args.behaviors]),
