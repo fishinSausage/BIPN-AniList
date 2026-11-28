@@ -7,6 +7,7 @@
 import argparse
 import os
 import random
+import sys
 import time
 
 import numpy as np
@@ -84,6 +85,17 @@ if __name__ == '__main__':
         args.data_path = './data/AniList' if args.data_name == 'anilist' else './data/AniList_sample'
         args.behaviors = ['planning', 'current', 'paused', 'completed', 'repeating', 'dropped',
                           'dislike', 'neutral', 'like']
+        # Same evaluation as the LightGCN baseline: recall@20 and ndcg@20 on the validation / test
+        # rows with eval_like = 1, best epoch chosen by validation recall@20.
+        args.topk = [20]
+        args.metrics = ['recall', 'ndcg']
+        args.select_metric = 'recall@20'
+        key_file = os.path.join(args.data_path, 'data_key.txt')
+        if not os.path.exists(key_file):
+            sys.exit('ERROR: %s was not made from the train, validation and test CSV. Run '
+                     'setup_and_train_anilist.bat (or data/AniList/data_process.py) to convert them.' % args.data_path)
+        with open(key_file) as f:
+            args.data_key = f.read().strip()  # saved progress made from other CSVs is not continued
     else:
         raise Exception('data_name cannot be None')
 

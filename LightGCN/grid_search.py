@@ -1,10 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Grid search for LightGCN's hyper-parameters on a train and a valid CSV.
+"""Grid search for LightGCN's hyper-parameters on a train, a validation and a test CSV.
 
-Started by run_lightgcn.bat. It asks for the two CSVs, keeps their rows with
-scaled_like = 1 (preprocess.py) and trains LightGCN (lightgcn.py) once for every
-combination of the two lists below. The combinations are ranked by validation recall@20.
+Started by run_lightgcn.bat. It asks for the three CSVs, reads them (preprocess.py) and
+trains LightGCN (lightgcn.py) once for every combination of the two lists below.
+
+  * trained on the train rows with scaled_like = 1
+  * the combinations are ranked by recall@20 on the validation rows with eval_like = 1
+  * recall@20 and ndcg@20 on the test rows with eval_like = 1 are reported for the best
+    epoch of every combination; they are never used to choose anything
 
 The lists are the ranges searched in the LightGCN paper (Section 4.1.2): the L2
 regularization coefficient lambda and the number of layers K. Everything else is fixed, as
@@ -14,7 +18,7 @@ Safe to stop and start again: finished combinations are skipped. A combination t
 running when the window was closed starts over.
 
 What is kept, in the results folder next to this file:
-    best_result.json   the best hyper-parameters and their validation result
+    best_result.json   the best hyper-parameters, their validation and test result
     best_model.pth     the embeddings of that best run
     grid_results.csv   every finished combination, best first
     log.txt            everything that was printed
@@ -39,7 +43,7 @@ FIRST = (1e-4, 3)                          # the paper's usual best is tried fir
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESULTS = os.path.join(HERE, 'results')
 RUNS = os.path.join(RESULTS, 'runs')
-KEYS = ['%s@%d' % (name, k) for k in lightgcn.TOPKS for name in ('recall', 'ndcg', 'hit')]
+RECALL, NDCG = lightgcn.METRICS
 
 
 def log(text=''):
@@ -78,7 +82,7 @@ def prepare_results(search):
 
 
 def ranked(done):
-    return sorted(done, key=lambda r: (-r['validation'][lightgcn.SELECT], -r['validation']['ndcg@20']))
+    return sorted(done, key=lambda r: (-r['validation'][RECALL], -r['validation'][NDCG]))
 
 
 def show(done, total):
@@ -86,16 +90,18 @@ def show(done, total):
     rows = ranked(done)
     with open(os.path.join(RESULTS, 'grid_results.csv'), 'w', encoding='utf-8', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['rank', 'lambda', 'layers', 'best_epoch', 'epochs', 'minutes'] + KEYS)
+        writer.writerow(['rank', 'lambda', 'layers', 'best_epoch', 'epochs', 'minutes',
+                         'validation_' + RECALL, 'validation_' + NDCG, 'test_' + RECALL, 'test_' + NDCG])
         for rank, r in enumerate(rows, 1):
-            writer.writerow([rank, '%g' % r['lambda'], r['layers'], r['best_epoch'], r['epochs'],
-                             '%.1f' % (r['seconds'] / 60)] + ['%.4f' % r['validation'][key] for key in KEYS])
-    log('\n%4s %8s %6s %6s | %9s %8s %7s %7s' % ('rank', 'lambda', 'layers', 'epoch', 'recall@20', 'ndcg@20', 'hit@20', 'ndcg@10'))
+            writer.writerow([rank, '%g' % r['lambda'], r['layers'], r['best_epoch'], r['epochs'], '%.1f' % (r['seconds'] / 60)]
+                            + ['%.4f' % r[part][key] for part in ('validation', 'test') for key in (RECALL, NDCG)])
+    log('\n%4s %8s %6s %6s | %-19s | %-19s' % ('rank', 'lambda', 'layers', 'epoch', 'validation', 'test'))
+    log('%27s | %9s %9s | %9s %9s' % ('', RECALL, NDCG, RECALL, NDCG))
     for rank, r in enumerate(rows[:10], 1):
-        v = r['validation']
-        log('%4d %8g %6d %6d | %9.4f %8.4f %7.4f %7.4f'
-            % (rank, r['lambda'], r['layers'], r['best_epoch'], v['recall@20'], v['ndcg@20'], v['hit@20'], v['ndcg@10']))
-    log('%d of %d combinations finished (validation, best 10 shown).' % (len(done), total))
+        log('%4d %8g %6d %6d | %9.4f %9.4f | %9.4f %9.4f' % (
+            rank, r['lambda'], r['layers'], r['best_epoch'],
+            r['validation'][RECALL], r['validation'][NDCG], r['test'][RECALL], r['test'][NDCG]))
+    log('%d of %d combinations finished (ranked by validation %s, best 10 shown).' % (len(done), total, RECALL))
     return rows
 
 
@@ -103,26 +109,25 @@ def save_best(best, data, search, state=None):
     """Remembers the best combination: best_result.json, and best_model.pth when its embeddings are given."""
     if state is not None:
         path = os.path.join(RESULTS, 'best_model.pth')
-        torch.save({'user_embedding': state['user_embedding'], 'item_embedding': state['item_embedding'],
-                    'layers': best['layers'], 'lambda': best['lambda'],
-                    'user_ids': torch.from_numpy(data['user_ids']), 'item_ids': torch.from_numpy(data['item_ids'])},
+        torch.save(dict(state, layers=best['layers'], **{'lambda': best['lambda']},
+                        user_ids=torch.from_numpy(data['user_ids']), item_ids=torch.from_numpy(data['item_ids'])),
                    path + '.tmp')
         os.replace(path + '.tmp', path)
     write_json(os.path.join(RESULTS, 'best_result.json'), {
         'model': 'LightGCN', 'chosen_by': 'validation ' + lightgcn.SELECT,
         'best_hyperparameters': {'lambda': best['lambda'], 'layers': best['layers']},
-        'best_epoch': best['best_epoch'], 'validation': best['validation'],
+        'best_epoch': best['best_epoch'], 'validation': best['validation'], 'test': best['test'],
         'fixed_settings': search['settings'], 'searched': {'lambda': LAMBDAS, 'layers': LAYERS},
-        'train_csv': data['train_file'], 'valid_csv': data['valid_file'],
-        'users': int(data['n_users']), 'titles': int(data['n_items']),
-        'train_likes': int(len(data['train_u'])), 'valid_likes': int(len(data['valid_u'])),
-        'weights': 'best_model.pth'})
+        'train_column': preprocess.TRAIN_LIKE_COL, 'answer_column': preprocess.EVAL_LIKE_COL,
+        'files': data['files'], 'users': int(data['n_users']), 'titles': int(data['n_items']),
+        'train_likes': int(len(data['train_u'])), 'validation_answers': int(len(data['valid_u'])),
+        'test_answers': int(len(data['test_u'])), 'weights': 'best_model.pth'})
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Grid search for LightGCN on a train and a valid CSV.')
-    parser.add_argument('--train', help='train CSV; an Explorer window asks for it when left out')
-    parser.add_argument('--valid', help='valid CSV; an Explorer window asks for it when left out')
+    parser = argparse.ArgumentParser(description='Grid search for LightGCN on a train, a validation and a test CSV.')
+    for part in preprocess.PARTS:
+        parser.add_argument('--' + part, help='%s CSV; an Explorer window asks for it when left out' % part)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--max_epochs', type=int, default=lightgcn.MAX_EPOCHS,
                         help='epoch limit of every run (the paper trains up to 1000)')
@@ -133,10 +138,11 @@ def main():
         print('WARNING: no usable NVIDIA GPU was found. Training on the CPU is extremely slow.')
         device = 'cpu'
 
-    print('[2/4] Train and valid CSV ...', flush=True)
-    train_file, valid_file = preprocess.pick_files(args.train, args.valid)
-    print('\n[3/4] Preprocessing: rows with %s = 1 ...' % preprocess.LIKE_COL, flush=True)
-    data = preprocess.load(train_file, valid_file)
+    print('[2/4] Train, validation and test CSV ...', flush=True)
+    paths = preprocess.pick_files({part: getattr(args, part) for part in preprocess.PARTS})
+    print('\n[3/4] Preprocessing: train rows with %s = 1, validation and test rows with %s = 1 ...'
+          % (preprocess.TRAIN_LIKE_COL, preprocess.EVAL_LIKE_COL), flush=True)
+    data = preprocess.load(paths)
 
     settings = dict(lightgcn.settings(), max_epochs=args.max_epochs)
     search = {'data': data['key'], 'settings': settings}
@@ -174,9 +180,10 @@ def main():
                 torch.cuda.empty_cache()
             continue
         state = result.pop('state')
-        run = {'lambda': lam, 'layers': layers, 'best_epoch': result['best_epoch'], 'epochs': result['epochs'],
-               'validation': result['metrics'], 'seconds': result['seconds'],
-               'seconds_per_epoch': result['seconds_per_epoch']}
+        run = dict(result, **{'lambda': lam, 'layers': layers})
+        log('  best epoch %d | validation %s %.4f %s %.4f | test %s %.4f %s %.4f' % (
+            run['best_epoch'], RECALL, run['validation'][RECALL], NDCG, run['validation'][NDCG],
+            RECALL, run['test'][RECALL], NDCG, run['test'][NDCG]))
         seconds.append(result['seconds'])
         done.append(run)
         if ranked(done)[0] is run:   # best so far: remember it before the run counts as finished
@@ -191,10 +198,10 @@ def main():
         sys.exit('\nNo combination finished. Fix the error shown above and start the grid search again.')
     best = show(done, len(combos))[0]
     save_best(best, data, search)
-    v = best['validation']
     log('\n============================================================')
     log(' Best hyper-parameters: lambda = %g, layers = %d  (best epoch %d)' % (best['lambda'], best['layers'], best['best_epoch']))
-    log(' Validation: recall@20 %.4f | ndcg@20 %.4f | hit@20 %.4f' % (v['recall@20'], v['ndcg@20'], v['hit@20']))
+    log(' Validation: %s %.4f | %s %.4f' % (RECALL, best['validation'][RECALL], NDCG, best['validation'][NDCG]))
+    log(' Test:       %s %.4f | %s %.4f' % (RECALL, best['test'][RECALL], NDCG, best['test'][NDCG]))
     log(' Remembered in %s' % RESULTS)
     log('   best_result.json  best_model.pth  grid_results.csv')
     log('============================================================')

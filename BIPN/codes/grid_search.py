@@ -4,7 +4,9 @@
 
 Started by grid_search_hyperparams.bat. Every combination of the three lists below
 is trained once with main.py, and the combinations are ranked by validation
-hit@20, the same number training uses to choose its best epoch.
+recall@20, the same number training uses to choose its best epoch. recall@20 and
+ndcg@20 are computed as in the LightGCN baseline (validation / test rows with
+eval_like = 1).
 
 Safe to stop and start again: finished combinations are skipped, and the one
 that was running continues from its last save.
@@ -32,10 +34,20 @@ MAIN_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'main.py')   
 ROOT = os.getcwd()   # the BIPN folder (holds data, check_point and log); the .bat file starts this script from there
 CHECK_POINT = os.path.join(ROOT, 'check_point')
 RESULTS_CSV = os.path.join(ROOT, 'grid_search_results.csv')
+KEY = ''   # set in main()
+
+
+def data_key():
+    """Identifies the CSVs the sample was made from, so results of other CSVs are never mixed in."""
+    path = os.path.join(ROOT, 'data', 'AniList_sample', 'data_key.txt')
+    if not os.path.exists(path):
+        sys.exit('ERROR: %s is missing. Start the grid search with grid_search_hyperparams.bat.' % path)
+    with open(path) as f:
+        return f.read().strip()
 
 
 def run_name(lr, beta, gamma):
-    return 'grid_lr%g_b%g_g%g' % (lr, beta, gamma)
+    return 'grid_%s_lr%g_b%g_g%g' % (KEY[:6], lr, beta, gamma)
 
 
 def read_result(name):
@@ -52,22 +64,23 @@ def metric(result, part, key):
 
 def show(done, total):
     """Prints the best 10 so far and writes the whole ranking to grid_search_results.csv."""
-    rows = sorted(done, key=lambda r: (-metric(r[3], 'validation', 'hit@20'), -metric(r[3], 'validation', 'ndcg@20')))
-    print('\n%4s %8s %5s %7s %6s | %-27s | %-27s' % ('rank', 'lr', 'beta', 'gamma', 'epoch', 'validation', 'test'))
-    print('%33s | %-13s %-13s | %-13s %-13s' % ('', 'hit@10/20', 'ndcg@10/20', 'hit@10/20', 'ndcg@10/20'))
+    rows = sorted(done, key=lambda r: (-metric(r[3], 'validation', 'recall@20'), -metric(r[3], 'validation', 'ndcg@20')))
+    print('\n%4s %8s %5s %7s %6s | %-19s | %-19s' % ('rank', 'lr', 'beta', 'gamma', 'epoch', 'validation', 'test'))
+    print('%33s | %9s %9s | %9s %9s' % ('', 'recall@20', 'ndcg@20', 'recall@20', 'ndcg@20'))
     with open(RESULTS_CSV, 'w', encoding='utf-8', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['rank', 'lr', 'beta', 'gamma', 'best_epoch'] +
                         ['%s_%s' % (part, key) for part in ('validation', 'test')
-                         for key in ('hit@10', 'ndcg@10', 'hit@20', 'ndcg@20')])
+                         for key in ('recall@20', 'ndcg@20')])
         for rank, (lr, beta, gamma, res) in enumerate(rows, 1):
             v = [metric(res, part, key) for part in ('validation', 'test')
-                 for key in ('hit@10', 'ndcg@10', 'hit@20', 'ndcg@20')]
+                 for key in ('recall@20', 'ndcg@20')]
             if rank <= 10:
-                print('%4d %8g %5g %7g %6s | %.4f/%.4f %.4f/%.4f | %.4f/%.4f %.4f/%.4f'
-                      % (rank, lr, beta, gamma, res.get('best_epoch', '?'), v[0], v[2], v[1], v[3], v[4], v[6], v[5], v[7]))
+                print('%4d %8g %5g %7g %6s | %9.4f %9.4f | %9.4f %9.4f'
+                      % (rank, lr, beta, gamma, res.get('best_epoch', '?'), v[0], v[1], v[2], v[3]))
             writer.writerow([rank, lr, beta, gamma, res.get('best_epoch', '')] + ['%.4f' % x for x in v])
-    print('%d of %d combinations finished (best 10 shown). Full table: %s' % (len(done), total, RESULTS_CSV), flush=True)
+    print('%d of %d combinations finished (ranked by validation recall@20, best 10 shown). Full table: %s'
+          % (len(done), total, RESULTS_CSV), flush=True)
     return rows
 
 
@@ -80,6 +93,8 @@ def main():
 
     if not os.path.isdir(os.path.join(ROOT, 'data')):
         sys.exit('ERROR: no data folder in %s. Start the grid search with grid_search_hyperparams.bat.' % ROOT)
+    global KEY
+    KEY = data_key()
     combos = list(itertools.product(LEARNING_RATES, BETAS, GAMMAS))
     if FIRST in combos:
         combos.remove(FIRST)
@@ -125,8 +140,8 @@ def main():
         sys.exit('\nNo combination finished. Fix the error shown above and start the grid search again.')
     rows = show(done, len(combos))
     lr, beta, gamma, best = rows[0]
-    print('\nBest so far: lr=%g  beta=%g  gamma=%g  (validation hit@20 %.4f, test hit@10 %.4f)'
-          % (lr, beta, gamma, metric(best, 'validation', 'hit@20'), metric(best, 'test', 'hit@10')))
+    print('\nBest so far: lr=%g  beta=%g  gamma=%g  (validation recall@20 %.4f, test recall@20 %.4f)'
+          % (lr, beta, gamma, metric(best, 'validation', 'recall@20'), metric(best, 'test', 'recall@20')))
     print('To train the full data with it, open setup_and_train_anilist.bat in Notepad and set')
     print('    set "LR=%g"\n    set "BETA=%g"\n    set "GAMMA=%g"' % (lr, beta, gamma))
     if failed:

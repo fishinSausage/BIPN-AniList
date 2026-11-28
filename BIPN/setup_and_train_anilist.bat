@@ -1,13 +1,18 @@
 @echo off
 rem BIPN on AniList: sets up this PC, converts the data and trains. Double-click to run.
 rem   1. installs Python 3.10 and the packages, if they are missing
-rem   2. converts data\AniList\interactions.csv into BIPN's format (the CSV is only read)
-rem   3. trains BIPN on 6 status + 3 rating behaviors, with "like" as the target
+rem   2. asks for the TRAIN, VALIDATION and TEST csv in three Explorer windows and
+rem      converts them into BIPN's format (the CSVs are only read)
+rem   3. trains BIPN on 6 status + 3 rating behaviors made from the train csv, with
+rem      "like" (scaled_like = 1) as the target. The best epoch is chosen by recall@20
+rem      on the validation rows with eval_like = 1; recall@20 and ndcg@20 on the test
+rem      rows are reported for it. Same evaluation as the LightGCN baseline (..\LightGCN).
 rem Safe to close and run again: finished steps are skipped and training continues
 rem from its last save (made every SAVE_MINUTES minutes and after every epoch).
 rem
 rem Folder layout: this file and grid_search_hyperparams.bat in the BIPN folder, the
-rem Python code in codes\, the CSV and its converter in data\AniList\.
+rem Python code in codes\, the converter in data\AniList\. The CSVs can stay anywhere.
+rem To convert other CSVs, delete data\AniList\split_report.txt and run this again.
 rem
 rem To force a PyTorch build:  setup_and_train_anilist.bat cpu   (or cu113, cu128)
 rem grid_search_hyperparams.bat runs this same file in grid-search mode.
@@ -138,15 +143,14 @@ echo [2/3] AniList data ...
 if not exist "codes\main.py" goto fail_nofiles
 if not exist "data\AniList\data_process.py" goto fail_nofiles
 if /i "%MODE%"=="grid" goto convert_sample
-if exist "data\AniList\convert_report.txt" goto converted
-if not exist "data\AniList\interactions.csv" goto fail_nocsv
+if exist "data\AniList\split_report.txt" goto converted
+echo       Select the TRAIN, VALIDATION and TEST csv in the windows that open.
 "%PYEXE%" "data\AniList\data_process.py"
 if errorlevel 1 goto fail_convert
 goto converted
 
 :convert_sample
-if exist "data\AniList_sample\convert_report.txt" goto converted
-if not exist "data\AniList\interactions.csv" goto fail_nocsv
+if exist "data\AniList_sample\split_report.txt" goto converted
 "%PYEXE%" "data\AniList\data_process.py" --sample %GRID_SAMPLE% --out "data\AniList_sample"
 if errorlevel 1 goto fail_convert
 
@@ -193,11 +197,6 @@ exit /b 0
 :fail_nofiles
 echo ERROR: codes\main.py or data\AniList\data_process.py is missing. Keep this
 echo file in the BIPN folder, next to the codes and data folders.
-goto failed
-
-:fail_nocsv
-echo ERROR: data\AniList\interactions.csv was not found. Put the AniList CSV there
-echo and run this file again.
 goto failed
 
 :fail_convert

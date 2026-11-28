@@ -2,14 +2,16 @@
 rem LightGCN baseline on AniList: grid search for the best hyper-parameters. Double-click to run.
 rem   1. installs Python 3.10 and the packages, if they are missing (done by
 rem      ..\BIPN\setup_and_train_anilist.bat, the same setup BIPN uses)
-rem   2. asks for the TRAIN csv and the VALID csv in two Explorer windows
-rem   3. keeps the rows with scaled_like = 1 (columns user_id, media_id, scaled_like)
+rem   2. asks for the TRAIN, VALIDATION and TEST csv in three Explorer windows
+rem   3. reads them: the train rows with scaled_like = 1 are the likes it learns from,
+rem      the validation and test rows with eval_like = 1 are the answers
 rem   4. trains LightGCN on the NVIDIA card for every combination of the values listed
-rem      at the top of grid_search.py and ranks them by validation recall@20
+rem      at the top of grid_search.py and ranks them by validation recall@20;
+rem      recall@20 and ndcg@20 on test are reported for the best one
 rem Safe to close and run again: finished combinations are skipped.
 rem
 rem What is kept, in the results folder next to this file:
-rem   best_result.json   the best hyper-parameters and their validation result
+rem   best_result.json   the best hyper-parameters, their validation and test result
 rem   best_model.pth     the trained model of that best run
 rem   grid_results.csv   every finished combination, best first
 rem

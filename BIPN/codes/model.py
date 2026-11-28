@@ -30,7 +30,8 @@ class BIPN(nn.Module):
         self.n_items = dataset.item_count
         self.inter_matrix = dataset.inter_matrix
         self.user_item_inter_set = dataset.user_item_inter_set
-        self.test_users = list(dataset.test_interacts.keys())
+        # users scored at evaluation: the validation users and the test users (not always the same users)
+        self.test_users = sorted(set(dataset.validation_interacts.keys()) | set(dataset.test_interacts.keys()), key=int)
         self.behaviors = args.behaviors
         self.embedding_size = args.embedding_size
         self.user_embedding = nn.Embedding(self.n_users + 1, self.embedding_size, padding_idx=0)
@@ -175,7 +176,7 @@ class BIPN(nn.Module):
                 tmp_users = torch.LongTensor(tmp_users)
                 tmp_embeddings = user_embedding[tmp_users].unsqueeze(1)
                 tmp_embeddings, _ = self.user_agg_item(tmp_users, tmp_embeddings, item_embedding)
-                tmp_emb_list.append(tmp_embeddings.squeeze())
+                tmp_emb_list.append(tmp_embeddings.squeeze(1))  # squeeze(1): a last batch of one user keeps its row
             tmp_emb_list = torch.cat(tmp_emb_list, dim=0)
             for index, key in enumerate(test_users):
                 self.storage_user_embeddings[key] = tmp_emb_list[index]

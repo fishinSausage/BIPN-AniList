@@ -127,6 +127,13 @@ class DataSet(object):
         with open(os.path.join(self.path, 'all_dict.txt'), encoding='utf-8') as f:
             b_dict = json.load(f)
             self.train_behavior_dict['all'] = b_dict
+        # AniList only: every title the user has a train row for. These are left out of the user's
+        # ranking at evaluation (trainer.py), the same rule as the LightGCN baseline.
+        self.seen_dict = None
+        seen_path = os.path.join(self.path, 'seen_dict.txt')
+        if os.path.exists(seen_path):
+            with open(seen_path, encoding='utf-8') as f:
+                self.seen_dict = json.load(f)
 
     # def __get_all_item_users(self):
     #     with open(os.path.join(self.path, 'all.txt'), encoding='utf-8') as f:

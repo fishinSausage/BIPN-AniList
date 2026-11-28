@@ -11,13 +11,18 @@ Follows "LightGCN: Simplifying and Powering Graph Convolution Network for Recomm
   * score = inner product of the user and the title embedding (Eq. 5)
   * BPR loss with L2 regularization on the layer-0 embeddings only, no dropout (Eq. 15)
   * the fixed settings below (Section 4.1.2)
-  * recall@20 and ndcg@20 over all titles the user has not liked in train (Section 4.1)
+  * recall@20 and ndcg@20 with the all-ranking protocol (Section 4.1)
   * early stopping as in NGCF, which the paper refers to: stop when recall@20 on the
     validation data has not increased for 50 epochs
 
 Where the paper gives no detail, the authors' code is followed
 (github.com/gusye1234/LightGCN-PyTorch): how the triples are sampled, the exact form of the
-loss, the recall and NDCG formulas and the masking of the train likes.
+loss and the recall and NDCG formulas.
+
+Evaluation rules of this project (the same as BIPN's, see preprocess.py): the graph is made
+of the train likes (scaled_like = 1); the candidates of a user are all titles of the train
+csv except the ones the user has a train row for; the answers are the validation / test
+rows with eval_like = 1.
 """
 import time
 
@@ -33,19 +38,20 @@ LEARNING_RATE = 0.001    # Adam with "the default learning rate of 0.001"
 BATCH_SIZE = 1024        # "default mini-batch size of 1024"
 MAX_EPOCHS = 1000        # "typically, 1000 epochs are sufficient for LightGCN to converge"
 PATIENCE_EPOCHS = 50     # NGCF: stop if recall@20 on validation does not increase for 50 epochs
+TOP_K = 20               # recall@20 and ndcg@20
 # ---- Not from the paper: these do not change the model ------------------------
 EVAL_EVERY = 5           # validation is computed every 5 epochs
 SEED = 2020
-TOPKS = (10, 20, 50, 80)  # recall, ndcg and hit are kept for each of these
-SELECT = 'recall@20'     # the best epoch and the best combination are chosen by this
-EVAL_BATCH = 1024        # users scored at once during validation
+SELECT = 'recall@20'     # the best epoch and the best combination are chosen by this, on validation
+EVAL_BATCH = 1024        # users scored at once during evaluation
 # -------------------------------------------------------------------------------
+METRICS = ('recall@%d' % TOP_K, 'ndcg@%d' % TOP_K)
 
 
 def settings():
     return {'embedding_size': EMBEDDING_SIZE, 'learning_rate': LEARNING_RATE, 'batch_size': BATCH_SIZE,
             'max_epochs': MAX_EPOCHS, 'patience_epochs': PATIENCE_EPOCHS, 'eval_every': EVAL_EVERY,
-            'seed': SEED, 'select': SELECT}
+            'seed': SEED, 'top_k': TOP_K, 'select': SELECT}
 
 
 def normalized_adjacency(train_u, train_i, n_users, n_items, device):
@@ -131,22 +137,26 @@ class Sampler:
 
 
 class Evaluator:
-    """Validation with the all-ranking protocol: every title the user has not liked in train is a candidate."""
+    """recall@20 and ndcg@20 of one answer set ('valid' or 'test') with the all-ranking protocol.
 
-    def __init__(self, data, device):
-        n_users, n_items = data['n_users'], data['n_items']
-        shape = (n_users, n_items)
-        train = sp.csr_matrix((np.ones(len(data['train_u']), dtype=np.int8), (data['train_u'], data['train_i'])), shape=shape)
-        valid = sp.csr_matrix((np.ones(len(data['valid_u']), dtype=np.int8), (data['valid_u'], data['valid_i'])), shape=shape)
-        users = np.unique(data['valid_u'])   # every user with at least one valid like
-        self.n_eval, self.top = len(users), min(max(TOPKS), n_items)
+    Every user with at least one answer is scored. The candidates are all titles except the
+    ones the user has a row for in the train csv.
+    """
+
+    def __init__(self, data, part, device):
+        shape = (data['n_users'], data['n_items'])
+        answer_u, answer_i = data[part + '_u'], data[part + '_i']
+        seen = sp.csr_matrix((np.ones(len(data['seen_u']), dtype=np.int8), (data['seen_u'], data['seen_i'])), shape=shape)
+        answers = sp.csr_matrix((np.ones(len(answer_u), dtype=np.int8), (answer_u, answer_i)), shape=shape)
+        users = np.unique(answer_u)
+        self.n_eval, self.top = len(users), min(TOP_K, data['n_items'])
         self.batches = []
         for s in range(0, len(users), EVAL_BATCH):
             batch = users[s:s + EVAL_BATCH]
-            tr, va = train[batch].tocoo(), valid[batch].tocoo()
+            se, an = seen[batch].tocoo(), answers[batch].tocoo()
             self.batches.append([torch.from_numpy(np.asarray(x)).long().to(device) for x in
-                                 (batch, tr.row, tr.col, va.row, va.col, valid[batch].getnnz(axis=1))])
-        discount = 1.0 / np.log2(np.arange(max(TOPKS)) + 2.0)
+                                 (batch, se.row, se.col, an.row, an.col, answers[batch].getnnz(axis=1))])
+        discount = 1.0 / np.log2(np.arange(TOP_K) + 2.0)
         self.discount = torch.from_numpy(discount).float().to(device)
         self.ideal = torch.from_numpy(np.cumsum(discount)).float().to(device)   # ideal[n-1] = best DCG with n hits
 
@@ -154,31 +164,28 @@ class Evaluator:
     def __call__(self, model):
         model.eval()
         user_all, item_all = model.propagate()
-        sums = {'%s@%d' % (name, k): 0.0 for k in TOPKS for name in ('recall', 'ndcg', 'hit')}
-        for users, tr_row, tr_col, va_row, va_col, n_true in self.batches:
+        recall = ndcg = 0.0
+        for users, seen_row, seen_col, an_row, an_col, n_answers in self.batches:
             scores = user_all[users] @ item_all.t()
-            scores[tr_row, tr_col] = -float('inf')        # titles liked in train are not candidates
+            scores[seen_row, seen_col] = -float('inf')    # titles the user has a train row for are not candidates
             top = scores.topk(self.top, dim=1)[1]
             truth = torch.zeros_like(scores, dtype=torch.bool)
-            truth[va_row, va_col] = True
-            hits = truth.gather(1, top).float()           # 1 where the title at that rank is a valid like
-            for k in TOPKS:
-                h = hits[:, :k]
-                n_hit = h.sum(dim=1)
-                dcg = (h * self.discount[:h.shape[1]]).sum(dim=1)
-                ideal = self.ideal[torch.clamp(n_true, max=k) - 1]
-                sums['recall@%d' % k] += float((n_hit / n_true).sum())
-                sums['ndcg@%d' % k] += float((dcg / ideal).sum())
-                sums['hit@%d' % k] += float((n_hit > 0).float().sum())
+            truth[an_row, an_col] = True
+            hits = truth.gather(1, top).float()           # 1 where the title at that rank is an answer
+            dcg = (hits * self.discount[:hits.shape[1]]).sum(dim=1)
+            ideal = self.ideal[torch.clamp(n_answers, max=TOP_K) - 1]
+            recall += float((hits.sum(dim=1) / n_answers).sum())
+            ndcg += float((dcg / ideal).sum())
         model.train()
-        return {name: round(value / self.n_eval, 6) for name, value in sums.items()}
+        return {METRICS[0]: round(recall / self.n_eval, 6), METRICS[1]: round(ndcg / self.n_eval, 6)}
 
 
 def train(data, n_layers, lam, device, max_epochs=MAX_EPOCHS, log=print):
     """Trains one LightGCN and returns its best validation epoch.
 
-    Returned dict: best_epoch, epochs (how many were run), metrics (validation, at the best
-    epoch), seconds, seconds_per_epoch and state (the layer-0 embeddings at the best epoch).
+    Returned dict: best_epoch, epochs (how many were run), validation and test (recall@20 and
+    ndcg@20 at the best validation epoch), seconds, seconds_per_epoch and state (the layer-0
+    and the final embeddings at the best epoch).
     """
     np.random.seed(SEED)
     torch.manual_seed(SEED)
@@ -187,9 +194,9 @@ def train(data, n_layers, lam, device, max_epochs=MAX_EPOCHS, log=print):
     model = LightGCN(data['n_users'], data['n_items'], n_layers, adjacency).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     sampler = Sampler(data['train_u'], data['train_i'], data['n_users'], data['n_items'], device)
-    evaluator = Evaluator(data, device)
+    validate, test = Evaluator(data, 'valid', device), Evaluator(data, 'test', device)
 
-    best, best_epoch, best_state, epoch, start = None, 0, None, 0, time.time()
+    best, best_test, best_epoch, best_state, epoch, start = None, None, 0, None, 0, time.time()
     for epoch in range(1, max_epochs + 1):
         epoch_start = time.time()
         users, pos, neg = sampler.sample()
@@ -208,17 +215,20 @@ def train(data, n_layers, lam, device, max_epochs=MAX_EPOCHS, log=print):
             log('  epoch 1 took %.1f s (%d batches)' % (time.time() - epoch_start, batches))
         if epoch % EVAL_EVERY and epoch != max_epochs:
             continue
-        metrics = evaluator(model)
+        metrics = validate(model)
         if best is None or metrics[SELECT] > best[SELECT]:
-            best, best_epoch = metrics, epoch
+            best, best_epoch, best_test = metrics, epoch, test(model)   # test is only reported, never used to choose
+            with torch.no_grad():
+                user_final, item_final = model.propagate()
             best_state = {'user_embedding': model.user_emb.weight.detach().cpu().clone(),
-                          'item_embedding': model.item_emb.weight.detach().cpu().clone()}
-        log('  epoch %4d | loss %.4f | recall@20 %.4f  ndcg@20 %.4f | best recall@20 %.4f at epoch %d | %.1f min'
-            % (epoch, mean_loss, metrics['recall@20'], metrics['ndcg@20'], best[SELECT], best_epoch,
+                          'item_embedding': model.item_emb.weight.detach().cpu().clone(),
+                          'user_final': user_final.cpu().clone(), 'item_final': item_final.cpu().clone()}
+        log('  epoch %4d | loss %.4f | validation recall@20 %.4f  ndcg@20 %.4f | best recall@20 %.4f at epoch %d | %.1f min'
+            % (epoch, mean_loss, metrics[METRICS[0]], metrics[METRICS[1]], best[SELECT], best_epoch,
                (time.time() - start) / 60))
         if epoch - best_epoch >= PATIENCE_EPOCHS:
-            log('  stopped: recall@20 has not increased for %d epochs' % PATIENCE_EPOCHS)
+            log('  stopped: validation recall@20 has not increased for %d epochs' % PATIENCE_EPOCHS)
             break
     seconds = time.time() - start
-    return {'best_epoch': best_epoch, 'epochs': epoch, 'metrics': best, 'seconds': round(seconds, 1),
-            'seconds_per_epoch': round(seconds / max(epoch, 1), 2), 'state': best_state}
+    return {'best_epoch': best_epoch, 'epochs': epoch, 'validation': best, 'test': best_test,
+            'seconds': round(seconds, 1), 'seconds_per_epoch': round(seconds / max(epoch, 1), 2), 'state': best_state}

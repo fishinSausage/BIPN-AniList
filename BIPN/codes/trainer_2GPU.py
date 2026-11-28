@@ -27,6 +27,8 @@ class Trainer(object):
         self.behaviors = args.behaviors
         self.topk = args.topk
         self.metrics = args.metrics
+        # the best epoch is the one with the highest value of this on validation
+        self.select_metric = getattr(args, 'select_metric', 'hit@20')
         self.learning_rate = args.lr
         self.weight_decay = args.decay
         self.batch_size = args.batch_size
@@ -69,7 +71,7 @@ class Trainer(object):
             test_metric_dict, validate_metric_dict = self._train_one_epoch(train_dataset_loader, epoch)
 
             if validate_metric_dict is not None:
-                result = validate_metric_dict['hit@20']
+                result = validate_metric_dict[self.select_metric]
                 # early stop
                 if result - best_result > 0:
                     final_test = test_metric_dict
@@ -146,7 +148,9 @@ class Trainer(object):
             )
         )
         topk_list = []
-        train_items = self.dataset.train_behavior_dict[self.behaviors[-1]]
+        # Titles left out of each user's ranking: everything the user has a train row for when the
+        # data has seen_dict.txt (AniList), otherwise the user's training items of the target behavior.
+        train_items = getattr(self.dataset, 'seen_dict', None) or self.dataset.train_behavior_dict[self.behaviors[-1]]
         for batch_index, batch_data in iter_data:
             batch_data = batch_data.to(self.device)
             start = time.time()
@@ -157,6 +161,7 @@ class Trainer(object):
                 items = train_items.get(str(user.item()), None)
                 if items is not None:
                     user_score[items] = -np.inf
+                user_score[0] = -np.inf  # number 0 is padding, not a title
                 _, topk_idx = torch.topk(user_score, max(self.topk), dim=-1)
                 gt_items = gt_interacts[str(user.item())]
                 mask = np.isin(topk_idx.to('cpu'), gt_items)
