@@ -52,7 +52,7 @@ class Trainer(object):
         self.result_path = os.path.join(self.model_path, self.model_name + '_result.json')
         self.settings = {k: str(getattr(args, k, None)) for k in (
             'data_name', 'behaviors', 'embedding_size', 'layers', 'lr', 'decay', 'reg_weight', 'log_reg',
-            'batch_size', 'neg_count', 'node_dropout', 'message_dropout', 'loss_type', 'data_key')}
+            'batch_size', 'neg_count', 'node_dropout', 'message_dropout', 'loss_type', 'data_key', 'select_metric')}
         self.last_save = time.time()
         self.best_result = 0
         self.best_dict = {}

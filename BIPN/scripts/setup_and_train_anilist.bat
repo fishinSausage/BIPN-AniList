@@ -4,21 +4,27 @@ rem   1. installs Python 3.10 and the packages, if they are missing
 rem   2. asks for the TRAIN, VALIDATION and TEST csv in three Explorer windows and
 rem      converts them into BIPN's format (the CSVs are only read)
 rem   3. trains BIPN on 6 status + 3 rating behaviors made from the train csv, with
-rem      "like" (scaled_like = 1) as the target. The best epoch is chosen by recall@20
+rem      "like" (scaled_like = 1) as the target. The best epoch is chosen by ndcg@20
 rem      on the validation rows with eval_like = 1; recall@20 and ndcg@20 on the test
 rem      rows are reported for it. Same evaluation as the LightGCN baseline (..\LightGCN).
 rem Safe to close and run again: finished steps are skipped and training continues
 rem from its last save (made every SAVE_MINUTES minutes and after every epoch).
 rem
-rem Folder layout: this file and grid_search_hyperparams.bat in the BIPN folder, the
+rem Folder layout: this file and the other stage start files in BIPN\scripts, the
 rem Python code in codes\, the converter in data\AniList\. The CSVs can stay anywhere.
 rem To convert other CSVs, delete data\AniList\split_report.txt and run this again.
 rem
 rem To force a PyTorch build:  setup_and_train_anilist.bat cpu   (or cu113, cu128)
 rem grid_search_hyperparams.bat runs this same file in grid-search mode.
-rem ..\LightGCN\run_lightgcn.bat runs it in setup mode: step 1 only, then it returns.
+rem train_likes_only.bat runs it in likes mode: BIPN with "like" as its only behavior, the
+rem plain BIPN baseline (converted data in data\AniList_likes, results named anilist_likes).
+rem search_recently_read.bat runs it in column mode: the cut-off search of a derived
+rem behavior (codes\column_search.py), first on a sample of the users, then the best
+rem cut-offs on all users.
+rem ..\..\LightGCN\scripts\run_lightgcn.bat runs it in setup mode: step 1 only, then it returns.
 setlocal
-cd /d "%~dp0"
+rem This file is in BIPN\scripts; everything below works from the BIPN folder.
+cd /d "%~dp0.."
 
 rem ---- Training settings ------------------------------------------------------
 rem Starting point: the settings the authors used for ML10M. Replace LR, BETA and
@@ -33,6 +39,12 @@ set "SAVE_MINUTES=30"
 rem Share of users the grid search runs on (0.1 = 10%). To change it later,
 rem delete the data\AniList_sample folder so that the sample is made again.
 set "GRID_SAMPLE=0.1"
+rem Cut-off search of a derived behavior (search_recently_read.bat, codes\column_search.py):
+rem step 1 tries every cut-off on this share of the users (0.1 = 10 percent, about 3,500
+rem users), step 2 runs the best SEARCH_TOP of them on all users and keeps the best one.
+rem Plain BIPN is run on the same users in each step. SEARCH_SAMPLE=1 skips step 1.
+set "SEARCH_SAMPLE=0.1"
+set "SEARCH_TOP=3"
 rem ---- Package versions (this replaces requirements.txt) --------------------
 rem Same as the authors' requirements.txt, except numpy: their 1.21.5 breaks
 rem scipy 1.10.1 on Windows, and 1.23.5 is the newest numpy that still has
@@ -54,11 +66,16 @@ set "MODE=train"
 set "BUILD="
 for %%a in (%*) do (
     if /i "%%~a"=="grid" set "MODE=grid"
+    if /i "%%~a"=="likes" set "MODE=likes"
+    if /i "%%~a"=="column" set "MODE=column"
     if /i "%%~a"=="setup" set "MODE=setup"
     if /i "%%~a"=="cpu" set "BUILD=cpu"
     if /i "%%~a"=="cu113" set "BUILD=cu113"
     if /i "%%~a"=="cu128" set "BUILD=cu128"
 )
+rem RUN names the data, the saved progress and the result of the training run.
+set "RUN=anilist"
+if /i "%MODE%"=="likes" set "RUN=anilist_likes"
 if /i "%MODE%"=="setup" goto step1
 title BIPN on AniList - %MODE%
 
@@ -143,6 +160,8 @@ echo [2/3] AniList data ...
 if not exist "codes\main.py" goto fail_nofiles
 if not exist "data\AniList\data_process.py" goto fail_nofiles
 if /i "%MODE%"=="grid" goto convert_sample
+if /i "%MODE%"=="likes" goto convert_likes
+if /i "%MODE%"=="column" goto column_search
 if exist "data\AniList\split_report.txt" goto converted
 echo       Select the TRAIN, VALIDATION and TEST csv in the windows that open.
 "%PYEXE%" "data\AniList\data_process.py"
@@ -154,6 +173,18 @@ if exist "data\AniList_sample\split_report.txt" goto converted
 "%PYEXE%" "data\AniList\data_process.py" --sample %GRID_SAMPLE% --out "data\AniList_sample"
 if errorlevel 1 goto fail_convert
 
+goto converted
+
+:convert_likes
+rem Likes only. Uses the CSVs chosen for the LightGCN grid search when there are any, so that
+rem both baselines read the same files; otherwise it asks. Converts only when it is needed.
+set "FILES_JSON="
+if exist "..\LightGCN\cache\last_files.json" set "FILES_JSON=..\LightGCN\cache\last_files.json"
+if not defined FILES_JSON if exist "data\AniList_likes\split_report.txt" goto converted
+if defined FILES_JSON "%PYEXE%" "data\AniList\data_process.py" --behaviors like --out "data\AniList_likes" --files_json "%FILES_JSON%"
+if not defined FILES_JSON "%PYEXE%" "data\AniList\data_process.py" --behaviors like --out "data\AniList_likes"
+if errorlevel 1 goto fail_convert
+
 :converted
 echo       Converted data is ready.
 rem codes\main.py saves the trained model and the training progress here.
@@ -162,26 +193,28 @@ if not exist check_point mkdir check_point
 echo.
 if /i "%MODE%"=="grid" goto grid
 echo [3/3] Training on the full data, device %DEV%.
+if /i "%MODE%"=="likes" echo       Plain BIPN baseline: "like" is the only behavior.
 echo       To stop, close this window. Run this file again to continue from the last save.
 echo.
-"%PYEXE%" "codes\main.py" --data_name anilist --device %DEV% --lr %LR% --log_reg %BETA% --reg_weight %GAMMA% --decay 0 --batch_size %BATCH_SIZE% --model_name anilist --resume --save_minutes %SAVE_MINUTES%
+"%PYEXE%" "codes\main.py" --data_name %RUN% --device %DEV% --lr %LR% --log_reg %BETA% --reg_weight %GAMMA% --decay 0 --batch_size %BATCH_SIZE% --model_name %RUN% --resume --save_minutes %SAVE_MINUTES%
 if errorlevel 1 goto train_stopped
-if not exist "check_point\anilist_result.json" goto train_stopped
+if not exist "check_point\%RUN%_result.json" goto train_stopped
 echo.
 echo ============================================================
 echo  Training finished.
-echo  Result:    check_point\anilist_result.json
-echo  Full log:  the newest file in log\anilist
+echo  Result:    check_point\%RUN%_result.json
+echo  Full log:  the newest file in log\%RUN%
 echo ============================================================
 echo.
-pause
+rem CHAINED is set by ..\..\LightGCN\scripts\run_lightgcn.bat when another step follows this one.
+if not defined CHAINED pause
 exit /b 0
 
 :train_stopped
 echo.
 echo Training stopped before it finished. If an error is shown above, fix it first
 echo (for "out of memory", lower BATCH_SIZE at the top of this file and delete
-echo check_point\anilist_resume.pt). Then run this file again to continue.
+echo check_point\%RUN%_resume.pt). Then run this file again to continue.
 goto failed
 
 :grid
@@ -194,9 +227,29 @@ echo.
 pause
 exit /b 0
 
+:column_search
+rem codes\column_search.py converts the CSVs itself, once per run. It uses the CSVs chosen for
+rem the LightGCN grid search when there are any, otherwise the ones of the last conversion,
+rem otherwise it asks. SEARCH_COLUMN is set by the start file that called this one.
+if not defined SEARCH_COLUMN set "SEARCH_COLUMN=recently_read"
+echo       The CSVs are converted by the search itself.
+if not exist check_point mkdir check_point
+echo.
+echo [3/3] %SEARCH_COLUMN% cut-off search, device %DEV%.
+echo       Step 1 on a share of %SEARCH_SAMPLE% of the users, then the best %SEARCH_TOP% on all users.
+echo       To stop, close this window. Start it again to continue.
+echo.
+set "FILES_ARG="
+if exist "..\LightGCN\cache\last_files.json" set FILES_ARG=--files_json "..\LightGCN\cache\last_files.json"
+"%PYEXE%" "codes\column_search.py" --column %SEARCH_COLUMN% --device %DEV% --lr %LR% --log_reg %BETA% --reg_weight %GAMMA% --batch_size %BATCH_SIZE% --save_minutes %SAVE_MINUTES% --sample %SEARCH_SAMPLE% --top %SEARCH_TOP% %FILES_ARG%
+if errorlevel 1 goto failed
+echo.
+pause
+exit /b 0
+
 :fail_nofiles
 echo ERROR: codes\main.py or data\AniList\data_process.py is missing. Keep this
-echo file in the BIPN folder, next to the codes and data folders.
+echo file in BIPN\scripts; the codes and data folders belong in the BIPN folder.
 goto failed
 
 :fail_convert
@@ -240,7 +293,7 @@ pause
 exit /b 1
 
 rem Setup mode ends here: the Python path and the device go back to the .bat file
-rem that called this one (..\LightGCN\run_lightgcn.bat).
+rem that called this one (..\..\LightGCN\scripts\run_lightgcn.bat).
 :setup_done
 endlocal & set "PYEXE=%PYEXE%" & set "DEV=%DEV%"
 exit /b 0

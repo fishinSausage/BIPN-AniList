@@ -5,6 +5,7 @@
 # @Date  : 2023/9/23 15:25
 # @Desc  :
 import argparse
+import json
 import os
 import random
 import sys
@@ -45,6 +46,8 @@ if __name__ == '__main__':
     parser.add_argument('--omega', type=float, default=1)
 
     parser.add_argument('--data_name', type=str, default='tmall', help='')
+    parser.add_argument('--data_dir', type=str, default='',
+                        help='AniList only: folder of converted data, instead of the one that belongs to --data_name')
     parser.add_argument('--behaviors', help='', action='append')
     parser.add_argument('--loss_type', type=str, default='bpr', help='')
     parser.add_argument('--neg_count', type=int, default=4)
@@ -80,22 +83,29 @@ if __name__ == '__main__':
     elif args.data_name == 'taobao':
         args.data_path = './data/taobao'
         args.behaviors = ['view', 'cart', 'buy']
-    elif args.data_name in ('anilist', 'anilist_sample'):
-        # made by data/AniList/data_process.py; anilist_sample is the 10% user sample for grid search
-        args.data_path = './data/AniList' if args.data_name == 'anilist' else './data/AniList_sample'
+    elif args.data_name in ('anilist', 'anilist_sample', 'anilist_likes') or (
+            args.data_name.startswith('anilist') and args.data_dir):
+        # made by data/AniList/data_process.py: anilist = all behaviors, anilist_sample = the 10% user
+        # sample for grid search, anilist_likes = likes only (the plain BIPN baseline)
+        args.data_path = args.data_dir or {'anilist': './data/AniList', 'anilist_sample': './data/AniList_sample',
+                                           'anilist_likes': './data/AniList_likes'}[args.data_name]
         args.behaviors = ['planning', 'current', 'paused', 'completed', 'repeating', 'dropped',
                           'dislike', 'neutral', 'like']
         # Same evaluation as the LightGCN baseline: recall@20 and ndcg@20 on the validation / test
-        # rows with eval_like = 1, best epoch chosen by validation recall@20.
+        # rows with eval_like = 1, best epoch chosen by validation ndcg@20 (SELECT in LightGCN/lightgcn.py).
         args.topk = [20]
         args.metrics = ['recall', 'ndcg']
-        args.select_metric = 'recall@20'
+        args.select_metric = 'ndcg@20'
         key_file = os.path.join(args.data_path, 'data_key.txt')
         if not os.path.exists(key_file):
             sys.exit('ERROR: %s was not made from the train, validation and test CSV. Run '
                      'setup_and_train_anilist.bat (or data/AniList/data_process.py) to convert them.' % args.data_path)
         with open(key_file) as f:
             args.data_key = f.read().strip()  # saved progress made from other CSVs is not continued
+        behaviors_file = os.path.join(args.data_path, 'behaviors.json')
+        if os.path.exists(behaviors_file):  # the behaviors of this conversion; the last one is the target
+            with open(behaviors_file) as f:
+                args.behaviors = json.load(f)
     else:
         raise Exception('data_name cannot be None')
 

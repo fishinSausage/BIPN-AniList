@@ -4,7 +4,9 @@
 
     python data_process.py                       # asks for the three CSVs with Explorer windows
     python data_process.py --train a.csv --validation b.csv --test c.csv
-    python data_process.py --sample 0.1 --out ../AniList_sample   # 10% of users, same CSVs
+    python data_process.py --sample 0.1 --out ../AniList_sample    # 10% of users, same CSVs
+    python data_process.py --behaviors like --out ../AniList_likes  # likes only: the plain BIPN baseline
+    python data_process.py --behaviors like --extra recently_read --cutoff 0.3 --out ../AniList_recently_read_30
 
 The CSVs are only read, never changed.
 
@@ -14,7 +16,17 @@ rating list if it is a like or has a score):
     like      scaled_like = 1
     dislike   has a score, not a like, score_100 <= 40
     neutral   has a score, not a like, score_100 > 40
-"like" is the target behavior.
+"like" is the target behavior. With --behaviors like it is the only behavior: BIPN then
+learns from exactly the same likes as the LightGCN baseline.
+
+Derived behaviors (--extra NAME --cutoff F): one more behavior, placed before "like", that is
+not a column of the CSVs but is worked out from the train csv with one number, the cut-off.
+They are listed in DERIVED below; to add one, write its function there. So far:
+    recently_read   for every user, the latest share (the cut-off) of the user's train rows
+                    by updated_at. updated_at is the time the list entry was last edited,
+                    which is not always the time the title was read. Rows without an
+                    updated_at are never recently_read.
+codes/column_search.py searches the cut-off of a derived behavior.
 
 Evaluation, the same rules as the LightGCN baseline (LightGCN/preprocess.py):
   * candidates: every title that appears in the train csv; for each user, the titles the
@@ -31,6 +43,7 @@ import collections
 import csv
 import hashlib
 import json
+import math
 import os
 import random
 import sys
@@ -44,9 +57,10 @@ STATUS_BEHAVIOR = {
     'REPEATING': 'repeating',
     'DROPPED': 'dropped',
 }
-# Same order as the 'anilist' entry in main.py. The last one is the target.
+# The last one is the target. main.py reads the list a conversion used from its behaviors.json.
 BEHAVIORS = ['planning', 'current', 'paused', 'completed', 'repeating', 'dropped', 'dislike', 'neutral', 'like']
 TARGET = 'like'
+BEHAVIOR_SETS = {'all': BEHAVIORS, 'like': [TARGET]}
 TRAIN_LIKE_COL = 'scaled_like'   # train csv: 1 = like
 EVAL_LIKE_COL = 'eval_like'      # validation and test csv: 1 = an answer
 DISLIKE_MAX = 40                 # dislike: has a score, not a like, score_100 <= 40
@@ -54,30 +68,54 @@ LIKE = {'1', '1.0', 'true'}                   # values that mean "like"
 NOT_LIKE = {'0', '0.0', 'false', '', 'nan'}   # values that mean "not a like"
 PARTS = ('train', 'validation', 'test')
 HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCE_FILES = os.path.join(HERE, 'source_files.json')   # the CSVs of the last full conversion
+SOURCE_FILES = os.path.join(HERE, 'source_files.json')   # the CSVs of the last conversion
 
 
-def remembered_files():
+def recently_read(rows, cutoff):
+    """The latest share (cutoff, 0..1) of one user's train rows by updated_at; equal times in title order."""
+    dated = sorted((t for t in rows if rows[t][2] > 0), key=lambda t: (-rows[t][2], t))
+    return dated[:int(math.ceil(cutoff * len(rows)))]
+
+
+# Derived behaviors: name -> function(rows, cutoff) that returns the titles of one user that get the
+# behavior. rows is {title: (status behavior or None, rating behavior or None, updated_at)} of the user's
+# train rows; cutoff is the one number that codes/column_search.py searches. Only the train csv may be
+# used, never validation or test.
+DERIVED = {
+    'recently_read': recently_read,
+}
+
+
+def listed_files(path):
+    """The CSV paths saved in a json file ({'train': ..., 'validation': ..., 'test': ...}), or {} if not usable."""
     try:
-        with open(SOURCE_FILES, encoding='utf-8') as f:
-            return json.load(f)
-    except (OSError, ValueError):
+        with open(path, encoding='utf-8') as f:
+            listed = json.load(f)
+    except (OSError, ValueError, TypeError):
         return {}
+    if isinstance(listed, dict) and all(os.path.isfile(str(listed.get(part, ''))) for part in PARTS):
+        return {part: listed[part] for part in PARTS}
+    return {}
 
 
-def pick_files(given, reuse):
+def pick_files(given, reuse, files_json=None):
     """Returns {'train': path, 'validation': path, 'test': path}.
 
-    Paths that were not given are asked for with Explorer windows. With reuse, the CSVs of
-    the last full conversion are used again without asking, if they are still there.
+    Order: the paths given on the command line; the CSVs listed in files_json (the ones chosen
+    for the LightGCN grid search); with reuse, the CSVs of the last full conversion. Whatever is
+    still missing is asked for with Explorer windows.
     """
-    last = remembered_files()
     paths = {part: given.get(part) for part in PARTS}
-    if reuse and not any(paths.values()) and all(os.path.isfile(last.get(part, '')) for part in PARTS):
-        print('Using the same CSVs as the last conversion:')
-        for part in PARTS:
-            print('      %-11s %s' % (part + ':', last[part]))
-        return {part: last[part] for part in PARTS}
+    if not any(paths.values()):
+        for source, text in ((files_json, 'Using the CSVs chosen for the LightGCN grid search:'),
+                             (SOURCE_FILES if reuse else None, 'Using the same CSVs as the last conversion:')):
+            listed = listed_files(source) if source else {}
+            if listed:
+                print(text)
+                for part in PARTS:
+                    print('      %-11s %s' % (part + ':', listed[part]))
+                return listed
+    last = listed_files(SOURCE_FILES)
     root = None
     if not all(paths.values()):
         try:
@@ -242,10 +280,21 @@ def file_key(path):
     return [os.path.normcase(os.path.abspath(path)), info.st_size, info.st_mtime_ns]
 
 
-def convert(paths, out_dir, sample, seed):
+def convert(paths, out_dir, sample, seed, behaviors, extra=None, cutoff=None):
     t0 = time.time()
-    data_key = hashlib.sha1(json.dumps([[file_key(paths[part]) for part in PARTS], sample, seed,
+    if extra:
+        behaviors = behaviors[:-1] + [extra, behaviors[-1]]   # the target stays the last one
+    else:
+        cutoff = None
+    data_key = hashlib.sha1(json.dumps([[file_key(paths[part]) for part in PARTS], sample, seed, behaviors,
+                                        cutoff,
                                         TRAIN_LIKE_COL, EVAL_LIKE_COL, DISLIKE_MAX]).encode('utf-8')).hexdigest()[:12]
+    key_file = os.path.join(out_dir, 'data_key.txt')
+    if os.path.exists(os.path.join(out_dir, 'split_report.txt')) and os.path.exists(key_file):
+        with open(key_file) as f:
+            if f.read().strip() == data_key:
+                print('Already converted from these CSVs: %s' % out_dir, flush=True)
+                return
     print('Reading %s' % paths['train'], flush=True)
     users, titles, notes = read_train(paths['train'])
     report = []
@@ -283,15 +332,19 @@ def convert(paths, out_dir, sample, seed):
         answer_notes[part] = (rows, len(pairs), no_user, no_title, in_train)
 
     # ---- the training lists -----------------------------------------------------------
-    lists = {b: {} for b in BEHAVIORS}                     # behavior -> {new user: [new titles]}
+    lists = {b: {} for b in behaviors}                     # behavior -> {new user: [new titles]}
     seen = {}                                              # new user -> every title of the user's train rows
     for u in user_ids:
         nu = new_user[u]
         seen[nu] = [new_title[t] for t in sorted(users[u])]
+        if extra:
+            chosen = DERIVED[extra](users[u], cutoff)
+            if chosen:
+                lists[extra][nu] = sorted(new_title[t] for t in chosen)
         for t in sorted(users[u]):
             status, rating, _ = users[u][t]
             for b in (status, rating):
-                if b is not None:
+                if b in lists:
                     lists[b].setdefault(nu, []).append(new_title[t])
 
     # ---- write ---------------------------------------------------------------------
@@ -306,7 +359,7 @@ def convert(paths, out_dir, sample, seed):
         if os.path.exists(out(stale)):
             os.remove(out(stale))
     all_items = {}
-    for b in BEHAVIORS:
+    for b in behaviors:
         with open(out(b + '.txt'), 'w') as f:
             for nu in sorted(lists[b]):
                 for nt in lists[b][nu]:
@@ -319,7 +372,7 @@ def convert(paths, out_dir, sample, seed):
     with open(out('seen_dict.txt'), 'w', encoding='utf-8') as f:
         json.dump({str(nu): seen[nu] for nu in sorted(seen)}, f)
     with open(out('pos_sampling.txt'), 'w') as f:
-        for index, b in enumerate(BEHAVIORS):
+        for index, b in enumerate(behaviors):
             for nu in sorted(lists[b]):
                 for nt in lists[b][nu]:
                     f.write('%d %d %d 1\n' % (nu, nt, index))
@@ -332,6 +385,8 @@ def convert(paths, out_dir, sample, seed):
             json.dump({str(nu): answers[part][nu] for nu in sorted(answers[part])}, f)
     with open(out('count.txt'), 'w') as f:
         json.dump({'user': len(user_ids), 'item': len(title_ids)}, f)
+    with open(out('behaviors.json'), 'w') as f:
+        json.dump(behaviors, f)
     with open(out('user_ids.csv'), 'w', encoding='utf-8', newline='') as f:
         w = csv.writer(f)
         w.writerow(['user', 'anilist_user_id'])
@@ -354,11 +409,15 @@ def convert(paths, out_dir, sample, seed):
     say('users %d | titles %d (all users and titles of the train csv)' % (len(user_ids), len(title_ids)))
     say('train rows of these users: %d' % sum(len(v) for v in seen.values()))
     say()
-    say('%-10s %12s' % ('behavior', 'training'))
-    for b in BEHAVIORS:
-        say('%-10s %12d%s' % (b, sum(len(v) for v in lists[b].values()),
-                              '   <- target (%s = 1)' % TRAIN_LIKE_COL if b == TARGET else ''))
-    say('%-10s %12d' % ('TOTAL', sum(len(v) for b in BEHAVIORS for v in lists[b].values())))
+    say('%-14s %12s' % ('behavior', 'training'))
+    for b in behaviors:
+        note = ''
+        if b == TARGET:
+            note = '   <- target (%s = 1)' % TRAIN_LIKE_COL
+        elif b == extra:
+            note = '   <- derived from the train csv, cut-off %g' % cutoff
+        say('%-14s %12d%s' % (b, sum(len(v) for v in lists[b].values()), note))
+    say('%-14s %12d' % ('TOTAL', sum(len(v) for b in behaviors for v in lists[b].values())))
     say()
     liked = set(lists[TARGET])
     for part in ('validation', 'test'):
@@ -372,20 +431,29 @@ def convert(paths, out_dir, sample, seed):
     say('written to %s in %ds' % (out_dir, time.time() - t0))
     with open(out('split_report.txt'), 'w', encoding='utf-8') as f:     # written last: marks a finished conversion
         f.write('\n'.join(report) + '\n')
-    if sample >= 1.0:
-        with open(SOURCE_FILES, 'w', encoding='utf-8') as f:            # the sample conversion uses the same CSVs
-            json.dump(paths, f, indent=1)
+    with open(SOURCE_FILES, 'w', encoding='utf-8') as f:                # later conversions can use the same CSVs
+        json.dump(paths, f, indent=1)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Convert the AniList train, validation and test CSV for BIPN.')
     for name in PARTS:
         parser.add_argument('--' + name, help='%s CSV; an Explorer window asks for it when left out' % name)
+    parser.add_argument('--files_json', help='json file listing the three CSVs (LightGCN/cache/last_files.json); '
+                                             'used when the CSVs are not given, so that both models read the same files')
     parser.add_argument('--out', default=HERE, help='folder for the converted files')
+    parser.add_argument('--behaviors', choices=sorted(BEHAVIOR_SETS), default='all',
+                        help='all = 6 status + 3 rating behaviors; like = likes only (the plain BIPN baseline)')
+    parser.add_argument('--extra', choices=sorted(DERIVED),
+                        help='one more behavior, derived from the train csv with --cutoff')
+    parser.add_argument('--cutoff', type=float, help='with --extra: its cut-off, above 0 and at most 1')
     parser.add_argument('--sample', type=float, default=1.0, help='fraction of users to keep, e.g. 0.1')
     parser.add_argument('--seed', type=int, default=2021)
     args = parser.parse_args()
     if not 0 < args.sample <= 1:
         sys.exit('ERROR: --sample must be between 0 and 1')
-    files = pick_files({name: getattr(args, name) for name in PARTS}, reuse=args.sample < 1.0)
-    convert(files, os.path.abspath(args.out), args.sample, args.seed)
+    if args.extra and (args.cutoff is None or not 0 < args.cutoff <= 1):
+        sys.exit('ERROR: --extra needs --cutoff, above 0 and at most 1')
+    files = pick_files({name: getattr(args, name) for name in PARTS}, reuse=args.sample < 1.0, files_json=args.files_json)
+    convert(files, os.path.abspath(args.out), args.sample, args.seed, list(BEHAVIOR_SETS[args.behaviors]),
+            args.extra, args.cutoff)

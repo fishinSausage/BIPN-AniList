@@ -4,7 +4,7 @@
 
 Started by grid_search_hyperparams.bat. Every combination of the three lists below
 is trained once with main.py, and the combinations are ranked by validation
-recall@20, the same number training uses to choose its best epoch. recall@20 and
+ndcg@20, the same number training uses to choose its best epoch. recall@20 and
 ndcg@20 are computed as in the LightGCN baseline (validation / test rows with
 eval_like = 1).
 
@@ -64,7 +64,7 @@ def metric(result, part, key):
 
 def show(done, total):
     """Prints the best 10 so far and writes the whole ranking to grid_search_results.csv."""
-    rows = sorted(done, key=lambda r: (-metric(r[3], 'validation', 'recall@20'), -metric(r[3], 'validation', 'ndcg@20')))
+    rows = sorted(done, key=lambda r: (-metric(r[3], 'validation', 'ndcg@20'), -metric(r[3], 'validation', 'recall@20')))
     print('\n%4s %8s %5s %7s %6s | %-19s | %-19s' % ('rank', 'lr', 'beta', 'gamma', 'epoch', 'validation', 'test'))
     print('%33s | %9s %9s | %9s %9s' % ('', 'recall@20', 'ndcg@20', 'recall@20', 'ndcg@20'))
     with open(RESULTS_CSV, 'w', encoding='utf-8', newline='') as f:
@@ -79,7 +79,7 @@ def show(done, total):
                 print('%4d %8g %5g %7g %6s | %9.4f %9.4f | %9.4f %9.4f'
                       % (rank, lr, beta, gamma, res.get('best_epoch', '?'), v[0], v[1], v[2], v[3]))
             writer.writerow([rank, lr, beta, gamma, res.get('best_epoch', '')] + ['%.4f' % x for x in v])
-    print('%d of %d combinations finished (ranked by validation recall@20, best 10 shown). Full table: %s'
+    print('%d of %d combinations finished (ranked by validation ndcg@20, best 10 shown). Full table: %s'
           % (len(done), total, RESULTS_CSV), flush=True)
     return rows
 
@@ -140,8 +140,8 @@ def main():
         sys.exit('\nNo combination finished. Fix the error shown above and start the grid search again.')
     rows = show(done, len(combos))
     lr, beta, gamma, best = rows[0]
-    print('\nBest so far: lr=%g  beta=%g  gamma=%g  (validation recall@20 %.4f, test recall@20 %.4f)'
-          % (lr, beta, gamma, metric(best, 'validation', 'recall@20'), metric(best, 'test', 'recall@20')))
+    print('\nBest so far: lr=%g  beta=%g  gamma=%g  (validation ndcg@20 %.4f, test ndcg@20 %.4f)'
+          % (lr, beta, gamma, metric(best, 'validation', 'ndcg@20'), metric(best, 'test', 'ndcg@20')))
     print('To train the full data with it, open setup_and_train_anilist.bat in Notepad and set')
     print('    set "LR=%g"\n    set "BETA=%g"\n    set "GAMMA=%g"' % (lr, beta, gamma))
     if failed:

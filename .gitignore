@@ -6,7 +6,8 @@
 # only the converter is kept.
 BIPN/data/AniList/*
 !BIPN/data/AniList/data_process.py
-BIPN/data/AniList_sample/
+# Converted variants: the grid-search sample, likes only, recently_read cut-offs.
+BIPN/data/AniList_*/
 
 # ---- Training output ---------------------------------------------------------
 # Saved progress and trained models, training logs, grid-search ranking.
@@ -14,6 +15,8 @@ BIPN/data/AniList_sample/
 check_point/
 log/
 grid_search_results.csv
+*_search_results.csv
+*_search_best.json
 # LightGCN baseline: its grid-search results and the preprocessed CSV data.
 LightGCN/results*/
 LightGCN/cache/

@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Grid search for LightGCN's hyper-parameters on a train, a validation and a test CSV.
 
-Started by run_lightgcn.bat. It asks for the three CSVs, reads them (preprocess.py) and
+Started by START.bat (or LightGCN/scripts/run_lightgcn.bat). It asks for the three CSVs, reads them (preprocess.py) and
 trains LightGCN (lightgcn.py) once for every combination of the two lists below.
 
   * trained on the train rows with scaled_like = 1
-  * the combinations are ranked by recall@20 on the validation rows with eval_like = 1
+  * the combinations are ranked by ndcg@20 (SELECT in lightgcn.py) on the validation rows
+    with eval_like = 1
   * recall@20 and ndcg@20 on the test rows with eval_like = 1 are reported for the best
     epoch of every combination; they are never used to choose anything
 
@@ -82,7 +83,9 @@ def prepare_results(search):
 
 
 def ranked(done):
-    return sorted(done, key=lambda r: (-r['validation'][RECALL], -r['validation'][NDCG]))
+    """Best first: by lightgcn.SELECT on validation; equal values are ordered by the other measure."""
+    other = NDCG if lightgcn.SELECT == RECALL else RECALL
+    return sorted(done, key=lambda r: (-r['validation'][lightgcn.SELECT], -r['validation'][other]))
 
 
 def show(done, total):
@@ -101,7 +104,7 @@ def show(done, total):
         log('%4d %8g %6d %6d | %9.4f %9.4f | %9.4f %9.4f' % (
             rank, r['lambda'], r['layers'], r['best_epoch'],
             r['validation'][RECALL], r['validation'][NDCG], r['test'][RECALL], r['test'][NDCG]))
-    log('%d of %d combinations finished (ranked by validation %s, best 10 shown).' % (len(done), total, RECALL))
+    log('%d of %d combinations finished (ranked by validation %s, best 10 shown).' % (len(done), total, lightgcn.SELECT))
     return rows
 
 
@@ -154,7 +157,7 @@ def main():
     name = torch.cuda.get_device_name(0) if device != 'cpu' else 'CPU'
     log('\n[4/4] Grid search: %d combinations, device %s (%s), started %s'
         % (len(combos), device, name, time.strftime('%Y-%m-%d %H:%M')))
-    log('      To stop, close this window. Run run_lightgcn.bat again to continue.')
+    log('      To stop, close this window. Start it again to continue.')
 
     done = [r for r in (read_json(os.path.join(RUNS, run_name(*c) + '.json')) for c in combos) if r]
     if done:

@@ -12,8 +12,11 @@ Follows "LightGCN: Simplifying and Powering Graph Convolution Network for Recomm
   * BPR loss with L2 regularization on the layer-0 embeddings only, no dropout (Eq. 15)
   * the fixed settings below (Section 4.1.2)
   * recall@20 and ndcg@20 with the all-ranking protocol (Section 4.1)
-  * early stopping as in NGCF, which the paper refers to: stop when recall@20 on the
-    validation data has not increased for 50 epochs
+  * early stopping as in NGCF, which the paper refers to: stop when the validation result
+    has not increased for 50 epochs
+
+One deliberate difference: NGCF watches recall@20 for the best epoch and the early stop. This
+project watches ndcg@20 (SELECT below), the measure BIPN's best epoch is chosen by as well.
 
 Where the paper gives no detail, the authors' code is followed
 (github.com/gusye1234/LightGCN-PyTorch): how the triples are sampled, the exact form of the
@@ -37,12 +40,13 @@ EMBEDDING_SIZE = 64      # "the embedding size is fixed to 64"
 LEARNING_RATE = 0.001    # Adam with "the default learning rate of 0.001"
 BATCH_SIZE = 1024        # "default mini-batch size of 1024"
 MAX_EPOCHS = 1000        # "typically, 1000 epochs are sufficient for LightGCN to converge"
-PATIENCE_EPOCHS = 50     # NGCF: stop if recall@20 on validation does not increase for 50 epochs
+PATIENCE_EPOCHS = 50     # NGCF: stop if the validation result does not increase for 50 epochs
 TOP_K = 20               # recall@20 and ndcg@20
 # ---- Not from the paper: these do not change the model ------------------------
 EVAL_EVERY = 5           # validation is computed every 5 epochs
 SEED = 2020
-SELECT = 'recall@20'     # the best epoch and the best combination are chosen by this, on validation
+SELECT = 'ndcg@20'       # the best epoch and the best combination are chosen by this, on validation
+#                          (NGCF and the LightGCN paper use recall@20; BIPN's main.py uses the same as here)
 EVAL_BATCH = 1024        # users scored at once during evaluation
 # -------------------------------------------------------------------------------
 METRICS = ('recall@%d' % TOP_K, 'ndcg@%d' % TOP_K)
@@ -223,11 +227,11 @@ def train(data, n_layers, lam, device, max_epochs=MAX_EPOCHS, log=print):
             best_state = {'user_embedding': model.user_emb.weight.detach().cpu().clone(),
                           'item_embedding': model.item_emb.weight.detach().cpu().clone(),
                           'user_final': user_final.cpu().clone(), 'item_final': item_final.cpu().clone()}
-        log('  epoch %4d | loss %.4f | validation recall@20 %.4f  ndcg@20 %.4f | best recall@20 %.4f at epoch %d | %.1f min'
-            % (epoch, mean_loss, metrics[METRICS[0]], metrics[METRICS[1]], best[SELECT], best_epoch,
+        log('  epoch %4d | loss %.4f | validation recall@20 %.4f  ndcg@20 %.4f | best %s %.4f at epoch %d | %.1f min'
+            % (epoch, mean_loss, metrics[METRICS[0]], metrics[METRICS[1]], SELECT, best[SELECT], best_epoch,
                (time.time() - start) / 60))
         if epoch - best_epoch >= PATIENCE_EPOCHS:
-            log('  stopped: validation recall@20 has not increased for %d epochs' % PATIENCE_EPOCHS)
+            log('  stopped: validation %s has not increased for %d epochs' % (SELECT, PATIENCE_EPOCHS))
             break
     seconds = time.time() - start
     return {'best_epoch': best_epoch, 'epochs': epoch, 'validation': best, 'test': best_test,
