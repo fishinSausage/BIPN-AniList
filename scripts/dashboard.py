@@ -4,15 +4,16 @@
 
     stage 1  LightGCN grid search                      (LightGCN/grid_search.py)
     stage 2  plain BIPN, likes only, one training run  (BIPN/data/AniList/data_process.py, BIPN/codes/main.py)
-    stage 3  cut-off search of the derived behavior COLUMN (BIPN/codes/column_search.py):
+    stage 3  cut-off search of the derived behavior recently_read (BIPN/codes/column_search.py):
              every cut-off on a sample of the users, then the best few on all users
+    stage 4  cut-off search of the derived behavior liked_author: five cut-offs, each on all users
 
 The window is split in two. The top part never scrolls: one row per model that shows
 "waiting", then "running" with its progress, then the result, in the same columns for every
 model so that they can be compared at a glance. The bottom part shows what the running
 stage prints.
 
-All three stages read the same train, validation and test csv (chosen once, in stage 1) and
+All stages read the same train, validation and test csv (chosen once, in stage 1) and
 are scored the same way. BIPN's settings, the sample share of stage 3 (SEARCH_SAMPLE) and
 the number of cut-offs that go on to all users (SEARCH_TOP) are the ones at the top of
 BIPN/scripts/setup_and_train_anilist.bat.
@@ -34,7 +35,7 @@ import threading
 import time
 import unicodedata
 
-COLUMN = 'recently_read'   # the derived behavior whose cut-off stage 3 searches (see BIPN/codes/column_search.py)
+SEARCH_COLUMNS = ['recently_read', 'liked_author']   # the derived behaviors that stages 3, 4, ... search, in this order
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -46,8 +47,6 @@ LIGHTGCN_RESULT = os.path.join(LIGHTGCN, 'results', 'best_result.json')
 BIPN_LIKES_DATA = os.path.join(BIPN, 'data', 'AniList_likes')
 BIPN_LIKES_RESULT = os.path.join(BIPN, 'check_point', 'anilist_likes_result.json')
 COLUMN_SEARCH = os.path.join(BIPN, 'codes', 'column_search.py')
-SEARCH_CSV = os.path.join(BIPN, '%s_search_results.csv' % COLUMN)
-SEARCH_BEST = os.path.join(BIPN, '%s_search_best.json' % COLUMN)
 
 ROW = ' %-30s %-8s %-10s  %-8s %-10s  %s'      # label, validation ndcg, recall, test ndcg, recall, last column
 STYLES = {'bold': '1', 'dim': '2', 'yellow': '33', 'green': '32', 'red': '31'}
@@ -79,14 +78,20 @@ def bat_settings():
     return found
 
 
-def column_percents():
-    """The cut-offs of COLUMN listed in BIPN/codes/column_search.py."""
+def column_configs():
+    """COLUMNS of BIPN/codes/column_search.py: the cut-offs of every derived column and how they are searched."""
+    sys.path.insert(0, os.path.join(BIPN, 'codes'))
     try:
-        with open(COLUMN_SEARCH, encoding='utf-8') as f:
-            match = re.search(r"'%s': \[([^\]]*)\]" % COLUMN, f.read())
-        return [int(x) for x in match.group(1).split(',') if x.strip()]
-    except (OSError, AttributeError, ValueError):
-        return [10, 20, 30, 40, 50, 60, 70, 80, 90]
+        import column_search
+        return column_search.COLUMNS
+    except Exception:
+        return {}
+    finally:
+        sys.path.pop(0)
+
+
+def search_csv(column):
+    return os.path.join(BIPN, '%s_search_results.csv' % column)
 
 
 def clock(seconds):
@@ -227,17 +232,24 @@ class Screen:
 
 # ---- what is known so far ----------------------------------------------------------------------
 class State:
-    def __init__(self, n_stages, percents, sample, top):
+    def __init__(self, n_stages, configs, sample, top):
         self.started, self.n_stages, self.stage = time.time(), n_stages, 0
-        self.percents, self.sample, self.n_candidates = percents, sample, top
+        self.sample, self.n_candidates = sample, top
         self.finished = self.failed = False
         self.files, self.counts = {}, {}
         # per stage: status = waiting / running / done / failed, text = what a running stage is doing
         self.lightgcn = {'status': 'waiting', 'text': '', 'result': None}
         self.bipn = {'status': 'waiting', 'text': '', 'result': None}
-        # stage 3: rows of each step ({percent or None for plain BIPN: row}), the candidates and the kept cut-off
-        self.search = {'status': 'waiting', 'text': '', 'sample': {}, 'all': {}, 'candidates': [], 'best': None,
-                       'current': None}                                          # current: (step, percent)
+        # one search per derived column, stages 3, 4, ...: the rows of each step ({percent, or None for
+        # plain BIPN: row}), the candidates, the kept cut-off and the run going on (step, percent)
+        self.columns = [c for c in SEARCH_COLUMNS if c in configs][:max(0, n_stages - 2)]
+        self.searches = {}
+        for number, column in enumerate(self.columns, 3):
+            config = configs[column]
+            self.searches[column] = {
+                'status': 'waiting', 'text': '', 'sample': {}, 'all': {}, 'candidates': [], 'best': None,
+                'current': None, 'stage': number, 'percents': config['percents'], 'sign': config.get('sign', ''),
+                'two_steps': sample < 1.0 and not config.get('all_users')}
         self.run = {'epoch': 0, 'best': None, 'best_epoch': 0}                   # the BIPN run going on
 
 
@@ -263,7 +275,6 @@ def build_top(state, width):
         info = ' CSVs: choose the train, validation and test csv in the windows that open'
     lines += [(info, None), (' ' + '-' * wide, 'dim')]
     over = state.finished or state.failed
-    search = state.search
 
     def text_row(label, text, style):
         return (' %-30s %s' % (label, text), style)
@@ -280,8 +291,8 @@ def build_top(state, width):
             return text_row(label, 'FAILED - see the messages below', 'red')
         return idle(label)
 
-    def search_row(label, step, percent, last, style=None):
-        """A row of stage 3: its numbers when the run has finished, otherwise what it is doing."""
+    def search_row(search, label, step, percent, last, style=None):
+        """A row of a cut-off search: its numbers when the run has finished, otherwise what it is doing."""
         row = search[step].get(percent)
         if row:
             return (ROW % tuple([label] + row['values'] + [last(row)]), style)
@@ -306,34 +317,38 @@ def build_top(state, width):
         lines.append((ROW % tuple(['             vs LightGCN'] + diff + ['']), 'dim'))
     else:
         lines.append(('', None))
-    if state.n_stages >= 3:
-        two_steps = state.sample < 1.0
-        shown = search['candidates'] if two_steps else state.percents
-        slots = state.n_candidates if two_steps else len(state.percents)
+    for column in state.columns:
+        search = state.searches[column]
+        name = '+ %s %s' % (column, search['sign'])
+        shown = search['candidates'] if search['two_steps'] else search['percents']
+        slots = state.n_candidates if search['two_steps'] else len(search['percents'])
         for slot in range(slots):
-            head = '3 BIPN  ' if slot == 0 else '        '
+            head = '%d BIPN  ' % search['stage'] if slot == 0 else '        '
             if slot < len(shown):
                 percent = shown[slot]
                 is_best = search['best'] == percent
-                lines.append(search_row('%s+ %s %d%%' % (head, COLUMN, percent), 'all', percent,
+                lines.append(search_row(search, '%s%s%d%%' % (head, name, percent), 'all', percent,
                                         lambda row, b=is_best: row['gain'] + ' vs likes only' + ('  <- best' if b else ''),
                                         'green' if is_best else None))
             elif search['status'] == 'failed' and not shown and slot == 0:
-                lines.append(text_row('%s+ %s' % (head, COLUMN), 'FAILED - see the messages below', 'red'))
+                lines.append(text_row('%s%s' % (head, name), 'FAILED - see the messages below', 'red'))
             else:
-                lines.append(idle('%s+ %s ..%%' % (head, COLUMN), 'waiting - one of the best %d of the sample below' % slots))
+                lines.append(idle('%s%s..%%' % (head, name), 'waiting - one of the best %d of the sample below' % slots))
     lines.append((' ' + '-' * wide, 'dim'))
 
-    # ---- stage 3, step 1: every cut-off on a sample of the users -----------------------------
-    if state.n_stages >= 3 and state.sample < 1.0:
+    # ---- step 1 of a two-step search: every cut-off on a sample of the users ------------------
+    for column in state.columns:
+        search = state.searches[column]
+        if not search['two_steps']:
+            continue
         block = '%g%% USER SAMPLE' % (100 * state.sample)
         lines.append((' %-30s %-19s  %-19s  %s' % (block, 'validation', 'test',
                                                  'picks the %d that go on to all users' % state.n_candidates), 'bold'))
         lines.append((ROW % ('', 'NDCG@20', 'Recall@20', 'NDCG@20', 'Recall@20', 'vs likes only'), None))
-        lines.append(search_row('        likes only', 'sample', None, lambda row: 'baseline (same users)'))
-        for percent in state.percents:
+        lines.append(search_row(search, '        likes only', 'sample', None, lambda row: 'baseline (same users)'))
+        for percent in search['percents']:
             is_candidate = percent in search['candidates']
-            lines.append(search_row('        + %s %d%%' % (COLUMN, percent), 'sample', percent,
+            lines.append(search_row(search, '        + %s %s%d%%' % (column, search['sign'], percent), 'sample', percent,
                                     lambda row, c=is_candidate: row['gain'] + ('  <- candidate' if c else ''),
                                     'green' if is_candidate else None))
     lines.append((' ' + '=' * wide, None))
@@ -409,13 +424,12 @@ def bipn_progress(state, line):
 def stage_lightgcn(args, screen, state, settings):
     stage = state.lightgcn
     stage.update(status='running', text='choose the three CSVs in the windows that open')
-    progress = {'done': 0, 'total': 20, 'left': ''}
+    progress = {'done': 0, 'total': 20, 'left': '', 'best': None}
 
     def describe():
         text = '%d of %d done' % (progress['done'], progress['total'])
-        best = read_json(LIGHTGCN_RESULT) if progress['done'] else None
-        if best:
-            text += ' - best NDCG@20 so far %.4f' % best['validation']['ndcg@20']
+        if progress['best']:   # taken from what the search prints; its result file is only read when it has ended
+            text += ' - best NDCG@20 so far %s' % progress['best']
         return text + progress['left']
 
     def on_line(line):
@@ -441,6 +455,10 @@ def stage_lightgcn(args, screen, state, settings):
         if re.match(r'=== \d+ of \d+:', line):
             left = re.search(r'about ([\d.]+) hours left', line)
             progress['left'] = ' - about %s h left' % left.group(1) if left else ''
+            stage['text'] = describe()
+        match = re.match(r'best so far: .* validation ndcg@20 ([\d.]+)', line)
+        if match:
+            progress['best'] = match.group(1)
             stage['text'] = describe()
         match = re.match(r'(\d+) of (\d+) combinations finished', line)
         if match:
@@ -500,12 +518,12 @@ def stage_bipn(args, screen, state, settings):
     return True
 
 
-def read_search_table(search):
-    """Fills the rows of stage 3 from <column>_search_results.csv."""
+def read_search_table(search, column):
+    """Fills the rows of a cut-off search from <column>_search_results.csv."""
     table = {'sample': {}, 'all': {}}
     candidates, best = [], None
     try:
-        with open(SEARCH_CSV, encoding='utf-8', newline='') as f:
+        with open(search_csv(column), encoding='utf-8', newline='') as f:
             for row in csv.DictReader(f):
                 percent = int(float(row['cutoff_percent'])) if row['cutoff_percent'] else None
                 table[row['step']][percent] = {
@@ -524,50 +542,58 @@ def read_search_table(search):
     search['best'] = best
 
 
-def stage_search(args, screen, state, settings):
-    stage = state.search
-    stage.update(status='running', text='starting')
+def search_stage(column):
+    """The stage that searches the cut-off of one derived column."""
+    def stage_search(args, screen, state, settings):
+        stage = state.searches[column]
+        stage.update(status='running', text='starting')
 
-    def on_line(line):
-        match = re.match(r'=== (sample|all users) (\d+) of (\d+): (.*) ===', line)
-        if match:
-            percent = re.search(r'\+ \w+ (\d+)%', match.group(4))
-            stage['current'] = ('sample' if match.group(1) == 'sample' else 'all', int(percent.group(1)) if percent else None)
-            stage['text'] = 'converting the CSVs'
-            state.run = {'epoch': 0, 'best': None, 'best_epoch': 0}
-        text = bipn_progress(state, line)
-        if text:
-            stage['text'] = text
-        elif 'Already converted' in line or 'written to' in line:
-            stage['text'] = 'loading the data'
-        if re.match(r'\d+ runs finished', line) or line.startswith('Candidates for step 2'):
-            read_search_table(stage)
+        def on_line(line):
+            match = re.match(r'=== (sample|all users) (\d+) of (\d+): (.*) ===', line)
+            if match:
+                percent = re.search(r'\+ \w+ >?(\d+)%', match.group(4))
+                stage['current'] = ('sample' if match.group(1) == 'sample' else 'all',
+                                    int(percent.group(1)) if percent else None)
+                stage['text'] = 'converting the CSVs'
+                state.run = {'epoch': 0, 'best': None, 'best_epoch': 0}
+            text = bipn_progress(state, line)
+            if text:
+                stage['text'] = text
+            elif 'Already converted' in line or 'written to' in line:
+                stage['text'] = 'loading the data'
+            if re.match(r'\d+ runs finished', line) or line.startswith('Candidates for step 2'):
+                read_search_table(stage, column)
 
-    command = [sys.executable, '-u', COLUMN_SEARCH, '--column', COLUMN, '--device', args.device, '--lr', settings['LR'],
-               '--log_reg', settings['BETA'], '--reg_weight', settings['GAMMA'], '--batch_size', settings['BATCH_SIZE'],
-               '--save_minutes', settings['SAVE_MINUTES'], '--sample', str(state.sample),
-               '--top', str(state.n_candidates)] + files_argument()
-    code = run(command, BIPN, screen, state, on_line)
-    read_search_table(stage)
-    if code == 0:
-        stage['current'] = None
-    return code == 0
+        command = [sys.executable, '-u', COLUMN_SEARCH, '--column', column, '--device', args.device,
+                   '--lr', settings['LR'], '--log_reg', settings['BETA'], '--reg_weight', settings['GAMMA'],
+                   '--batch_size', settings['BATCH_SIZE'], '--save_minutes', settings['SAVE_MINUTES'],
+                   '--sample', str(state.sample), '--top', str(state.n_candidates)] + files_argument()
+        code = run(command, BIPN, screen, state, on_line)
+        read_search_table(stage, column)
+        if code == 0:
+            stage['current'] = None
+        return code == 0
+    return stage_search
 
 
-STAGES = [('LightGCN grid search', 'lightgcn', stage_lightgcn),
-          ('plain BIPN baseline (likes only)', 'bipn', stage_bipn),
-          ('%s cut-off search' % COLUMN, 'search', stage_search)]
+def stages_of(state):
+    """(title, the stage's entry in the state, function) for every stage that is run."""
+    stages = [('LightGCN grid search', state.lightgcn, stage_lightgcn),
+              ('plain BIPN baseline (likes only)', state.bipn, stage_bipn)]
+    stages += [('%s cut-off search' % column, state.searches[column], search_stage(column)) for column in state.columns]
+    return stages[:state.n_stages]
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run the LightGCN grid search, plain BIPN and the cut-off search '
+    parser = argparse.ArgumentParser(description='Run the LightGCN grid search, plain BIPN and the cut-off searches '
                                                  'one after another, with a summary that stays in sight.')
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--stages', type=int, default=3, choices=(1, 2, 3), help='how many of the three stages to run')
+    parser.add_argument('--stages', type=int, default=2 + len(SEARCH_COLUMNS), choices=range(1, 3 + len(SEARCH_COLUMNS)),
+                        help='how many of the stages to run')
     for part in ('train', 'validation', 'test'):
         parser.add_argument('--' + part, help='%s CSV; an Explorer window asks for it when left out' % part)
     parser.add_argument('--max_epochs', type=int, help='for a quick test: epoch limit of every LightGCN run')
-    parser.add_argument('--sample', type=float, help='for a quick test: share of users for step 1 of stage 3 instead of SEARCH_SAMPLE')
+    parser.add_argument('--sample', type=float, help='for a quick test: share of users of a sample step instead of SEARCH_SAMPLE')
     parser.add_argument('--size', help='for testing the layout: draw for a window of this size, e.g. 116x42')
     args = parser.parse_args()
     try:
@@ -577,7 +603,8 @@ def main():
 
     settings = bat_settings()
     sample = args.sample if args.sample else float(settings['SEARCH_SAMPLE'])
-    state = State(args.stages, column_percents(), sample, int(settings['SEARCH_TOP']))
+    state = State(args.stages, column_configs(), sample, int(settings['SEARCH_TOP']))
+    stages = stages_of(state)
     forced = tuple(int(x) for x in args.size.lower().split('x')) if args.size else None
     screen = Screen(len(build_top(state, 116)), forced)
 
@@ -586,13 +613,13 @@ def main():
 
     try:
         refresh()
-        for number, (title, name, function) in enumerate(STAGES[:args.stages], 1):
+        for number, (title, entry, function) in enumerate(stages, 1):
             state.stage = number
             screen.log('')
-            screen.log('######## stage %d of %d: %s ########' % (number, args.stages, title))
+            screen.log('######## stage %d of %d: %s ########' % (number, len(stages), title))
             refresh()
             ok = function(args, screen, state, settings)
-            getattr(state, name)['status'] = 'done' if ok else 'failed'
+            entry['status'] = 'done' if ok else 'failed'
             if not ok:
                 state.failed = True
                 refresh(plain_too=True)
@@ -605,12 +632,12 @@ def main():
         state.finished = True
         refresh(plain_too=True)
         screen.log('')
-        screen.log('All %d stages finished. The results are kept in:' % args.stages)
+        screen.log('All %d stages finished. The results are kept in:' % len(stages))
         screen.log('  LightGCN\\results\\best_result.json, best_model.pth, grid_results.csv')
         if args.stages >= 2:
             screen.log('  BIPN\\check_point\\anilist_likes_result.json')
-        if args.stages >= 3:
-            screen.log('  BIPN\\%s and %s' % (os.path.basename(SEARCH_CSV), os.path.basename(SEARCH_BEST)))
+        for column in state.columns:
+            screen.log('  BIPN\\%s_search_results.csv and %s_search_best.json' % (column, column))
         screen.wait_for_key()
         return 0
     finally:

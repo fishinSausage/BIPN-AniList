@@ -7,6 +7,7 @@
     python data_process.py --sample 0.1 --out ../AniList_sample    # 10% of users, same CSVs
     python data_process.py --behaviors like --out ../AniList_likes  # likes only: the plain BIPN baseline
     python data_process.py --behaviors like --extra recently_read --cutoff 0.3 --out ../AniList_recently_read_30
+    python data_process.py --behaviors like --extra liked_author --cutoff 0.5 --out ../AniList_liked_author_50
 
 The CSVs are only read, never changed.
 
@@ -26,6 +27,11 @@ They are listed in DERIVED below; to add one, write its function there. So far:
                     by updated_at. updated_at is the time the list entry was last edited,
                     which is not always the time the title was read. Rows without an
                     updated_at are never recently_read.
+    liked_author    a title by an author the user likes: of the user's OTHER train titles by
+                    one of the title's authors, more than the cut-off share are likes. The
+                    title itself is left out, so its own like is not part of the behavior.
+                    Authors are the staff of authors_json with a creator's role (story, art,
+                    original story / creator, illustration), not letterers or translators.
 codes/column_search.py searches the cut-off of a derived behavior.
 
 Evaluation, the same rules as the LightGCN baseline (LightGCN/preprocess.py):
@@ -46,6 +52,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 
@@ -71,18 +78,57 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE_FILES = os.path.join(HERE, 'source_files.json')   # the CSVs of the last conversion
 
 
-def recently_read(rows, cutoff):
+def recently_read(rows, cutoff, info=None):
     """The latest share (cutoff, 0..1) of one user's train rows by updated_at; equal times in title order."""
     dated = sorted((t for t in rows if rows[t][2] > 0), key=lambda t: (-rows[t][2], t))
     return dated[:int(math.ceil(cutoff * len(rows)))]
 
 
-# Derived behaviors: name -> function(rows, cutoff) that returns the titles of one user that get the
-# behavior. rows is {title: (status behavior or None, rating behavior or None, updated_at)} of the user's
-# train rows; cutoff is the one number that codes/column_search.py searches. Only the train csv may be
-# used, never validation or test.
+CREATOR = re.compile(r'^\s*(story|art|original (story|creator)|illustration)', re.I)   # an author's role
+
+
+def creators(text):
+    """The author ids of a title, from its authors_json value: the staff with a creator's role."""
+    found = set()
+    if len(text) > 2:
+        try:
+            for person in json.loads(text):
+                if CREATOR.match(str(person.get('role') or '')):
+                    found.add(int(person['id']))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            pass
+    return tuple(sorted(found))
+
+
+def liked_author(rows, cutoff, info):
+    """The titles by an author the user likes: of the user's OTHER train titles by one of the title's
+    authors, more than the share cutoff (0..1) are likes. Leaving the title itself out keeps its own
+    like, which is what BIPN has to predict, out of the behavior."""
+    authors = info['authors']
+    total, liked = collections.Counter(), collections.Counter()
+    for title, row in rows.items():
+        for author in authors.get(title, ()):
+            total[author] += 1
+            liked[author] += row[1] == TARGET
+    chosen = []
+    for title, row in rows.items():
+        own = row[1] == TARGET
+        for author in authors.get(title, ()):
+            others = total[author] - 1
+            if others > 0 and (liked[author] - own) / others > cutoff:
+                chosen.append(title)
+                break
+    return chosen
+
+
+# Derived behaviors: name -> function(rows, cutoff, info) that returns the titles of one user that get
+# the behavior. rows is {title: (status behavior or None, rating behavior or None, updated_at)} of the
+# user's train rows; cutoff is the one number that codes/column_search.py searches; info holds what is
+# known about the titles ({'authors': {title: author ids}}). Only the train csv may be used, never
+# validation or test, and a row's own like must not decide the row's own behavior.
 DERIVED = {
     'recently_read': recently_read,
+    'liked_author': liked_author,
 }
 
 
@@ -162,7 +208,7 @@ def to_int(text):
 
 
 def open_csv(path, needed):
-    """Opens a CSV and returns (file, reader, positions of the needed columns, position of media_title or None)."""
+    """Opens a CSV and returns (file, reader, positions of the needed columns, {column name: position})."""
     csv.field_size_limit(2 ** 31 - 1)
     f = open(path, 'r', encoding='utf-8-sig', errors='replace', newline='')
     reader = csv.reader(f)
@@ -173,7 +219,7 @@ def open_csv(path, needed):
         f.close()
         sys.exit('ERROR: %s has no column named %s.\nIts columns are: %s'
                  % (path, ' or '.join(missing), ', '.join(header) or '(none)'))
-    return f, reader, [col[c] for c in needed], col.get('media_title')
+    return f, reader, [col[c] for c in needed], col
 
 
 def like_value(text, other):
@@ -195,15 +241,18 @@ def check(path, column, other, short):
 
 
 def read_train(path):
-    """Returns {user: {title: (status behavior or None, rating behavior or None, updated_at)}}, titles, notes.
+    """Returns {user: {title: (status behavior or None, rating behavior or None, updated_at)}}, titles, notes
+    and {title: author ids}.
 
     Every row of the train csv is kept, also one without a behavior: the user has seen that title.
     """
-    users, titles = {}, {}
+    users, titles, authors = {}, {}, {}
     notes = {'rows': 0, 'unknown_status': 0, 'repeated_pairs': 0}
     other, short, t0 = collections.Counter(), 0, time.time()
     needed = ['user_id', 'media_id', 'status', 'score_100', 'score_available', 'updated_at', TRAIN_LIKE_COL]
-    f, reader, (iu, im, ist, isc, ifl, iup, ilk), ititle = open_csv(path, needed)
+    f, reader, (iu, im, ist, isc, ifl, iup, ilk), col = open_csv(path, needed)
+    ititle, iauthors = col.get('media_title'), col.get('authors_json')
+    notes['authors_column'] = iauthors is not None
     need = max(iu, im, ist, isc, ifl, iup, ilk) + 1
     with f:
         for row in reader:
@@ -247,8 +296,9 @@ def read_train(path):
             entries[title] = (status, rating, updated)
             if title not in titles:
                 titles[title] = row[ititle].strip() if ititle is not None else ''
+                authors[title] = creators(row[iauthors]) if iauthors is not None and len(row) > iauthors else ()
     check(path, TRAIN_LIKE_COL, other, short)
-    return users, titles, notes
+    return users, titles, notes, authors
 
 
 def read_answers(path):
@@ -296,7 +346,10 @@ def convert(paths, out_dir, sample, seed, behaviors, extra=None, cutoff=None):
                 print('Already converted from these CSVs: %s' % out_dir, flush=True)
                 return
     print('Reading %s' % paths['train'], flush=True)
-    users, titles, notes = read_train(paths['train'])
+    users, titles, notes, authors = read_train(paths['train'])
+    if extra == 'liked_author' and not notes['authors_column']:
+        sys.exit('ERROR: liked_author needs the authors_json column, which %s does not have.' % paths['train'])
+    info = {'authors': authors}
     report = []
 
     def say(line=''):
@@ -338,7 +391,7 @@ def convert(paths, out_dir, sample, seed, behaviors, extra=None, cutoff=None):
         nu = new_user[u]
         seen[nu] = [new_title[t] for t in sorted(users[u])]
         if extra:
-            chosen = DERIVED[extra](users[u], cutoff)
+            chosen = DERIVED[extra](users[u], cutoff, info)
             if chosen:
                 lists[extra][nu] = sorted(new_title[t] for t in chosen)
         for t in sorted(users[u]):
@@ -446,14 +499,14 @@ if __name__ == '__main__':
                         help='all = 6 status + 3 rating behaviors; like = likes only (the plain BIPN baseline)')
     parser.add_argument('--extra', choices=sorted(DERIVED),
                         help='one more behavior, derived from the train csv with --cutoff')
-    parser.add_argument('--cutoff', type=float, help='with --extra: its cut-off, above 0 and at most 1')
+    parser.add_argument('--cutoff', type=float, help='with --extra: its cut-off, from 0 to 1')
     parser.add_argument('--sample', type=float, default=1.0, help='fraction of users to keep, e.g. 0.1')
     parser.add_argument('--seed', type=int, default=2021)
     args = parser.parse_args()
     if not 0 < args.sample <= 1:
         sys.exit('ERROR: --sample must be between 0 and 1')
-    if args.extra and (args.cutoff is None or not 0 < args.cutoff <= 1):
-        sys.exit('ERROR: --extra needs --cutoff, above 0 and at most 1')
+    if args.extra and (args.cutoff is None or not 0 <= args.cutoff <= 1):
+        sys.exit('ERROR: --extra needs --cutoff, from 0 to 1')
     files = pick_files({name: getattr(args, name) for name in PARTS}, reuse=args.sample < 1.0, files_json=args.files_json)
     convert(files, os.path.abspath(args.out), args.sample, args.seed, list(BEHAVIOR_SETS[args.behaviors]),
             args.extra, args.cutoff)

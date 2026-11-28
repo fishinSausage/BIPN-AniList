@@ -17,7 +17,8 @@ The procedure is the same for every column:
         validation ndcg@20 is the cut-off that is kept.
 
 Step 1 is cheap and only narrows the list down, because neighboring cut-offs differ by
-little and a run on all users takes hours; step 2 decides. Every run uses the same
+little and a run on all users takes hours; step 2 decides. A column marked all_users in
+COLUMNS (liked_author) has no step 1: each of its few cut-offs is run on all users. Every run uses the same
 settings and the same train, validation and test csv, and is scored like the LightGCN
 baseline (recall@20 and ndcg@20 on the validation / test rows with eval_like = 1). Test is
 only reported, never used to choose.
@@ -39,9 +40,17 @@ import os
 import subprocess
 import sys
 
-# column -> the cut-offs to try, in percent (what a cut-off means is decided by the column's function)
+# column -> how its cut-off is searched
+#   percents   the cut-offs to try, in percent (what a cut-off means is decided by the column's function)
+#   sign       put before the percent in the tables ('>' for "share above ...")
+#   all_users  True = no sample step, every cut-off is run on all users. For a column that marks few rows:
+#              a run is then cheap, and the differences are too small to rank the cut-offs on a sample.
 COLUMNS = {
-    'recently_read': [10, 20, 30, 40, 50, 60, 70, 80, 90],
+    # the latest N percent of each user's rows
+    'recently_read': {'percents': [10, 20, 30, 40, 50, 60, 70, 80, 90]},
+    # the user likes more than N percent of the other titles by the author. The share is nearly always a
+    # simple fraction (1 of 2, 1 of 3, all), so these five cut-offs are the ones that select different rows.
+    'liked_author': {'percents': [0, 20, 40, 50, 90], 'sign': '>', 'all_users': True},
 }
 SELECT = 'ndcg@20'    # what main.py chooses the best epoch by (args.select_metric); the cut-offs are compared by it
 OTHER = 'recall@20'
@@ -81,6 +90,7 @@ def metric(result, part, key):
 class Search:
     def __init__(self, args):
         self.args, self.column = args, args.column
+        self.sign = COLUMNS[args.column].get('sign', '')
         self.files = csv_files(args.files_json)
         self.rows = []   # one per finished run: {'step': 'sample' or 'all', 'percent': None or int, 'result': ...}
         self.candidates, self.best = [], None
@@ -88,7 +98,7 @@ class Search:
         self.best_json = os.path.join(ROOT, '%s_search_best.json' % self.column)
 
     def label(self, percent):
-        return 'like  (plain BIPN)' if percent is None else '+ %s %d%%' % (self.column, percent)
+        return 'like  (plain BIPN)' if percent is None else '+ %s %s%d%%' % (self.column, self.sign, percent)
 
     def convert(self, folder, percent, sample):
         """Converts the CSVs into folder; the converter skips it if it is already done."""
@@ -210,8 +220,8 @@ def main():
     os.makedirs(CHECK_POINT, exist_ok=True)
 
     search = Search(args)
-    percents = COLUMNS[args.column]
-    two_steps = args.sample < 1.0
+    percents = COLUMNS[args.column]['percents']
+    two_steps = args.sample < 1.0 and not COLUMNS[args.column].get('all_users')
     if two_steps:
         print('%s cut-off search, device %s' % (args.column, args.device))
         print('step 1: plain BIPN and %d cut-offs on %g%% of the users -> the best %d are the candidates'
@@ -242,8 +252,8 @@ def main():
     else:
         best = ranked[0]['result']
         value = metric(best, 'validation', SELECT)
-        print(' Kept cut-off for %s: %d%%  (best on all users of the cut-offs %s)'
-              % (args.column, search.best, ', '.join('%d%%' % p for p in search.candidates)))
+        print(' Kept cut-off for %s: %s%d%%  (best on all users of the cut-offs %s)'
+              % (args.column, search.sign, search.best, ', '.join('%s%d%%' % (search.sign, p) for p in search.candidates)))
         if plain:
             base = metric(plain['result'], 'validation', SELECT)
             print(' validation %s %.4f against %.4f for plain BIPN (%+.4f)' % (SELECT, value, base, value - base))

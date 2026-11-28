@@ -11,8 +11,13 @@ rem                    of the users (about 3,500); the best 3 become the candida
 rem            step 2  the 3 candidates on all users; the best one is kept
 rem            each compared with plain BIPN on the same users
 rem            (BIPN\recently_read_search_results.csv, BIPN\recently_read_search_best.json)
+rem   stage 4  cut-off search of the derived behavior liked_author (a title by an author
+rem            the user likes, judged by the user's other titles by that author): the
+rem            cut-offs above 0, 20, 40, 50 and 90 percent, each on all users; the best
+rem            one is kept, each compared with plain BIPN
+rem            (BIPN\liked_author_search_results.csv, BIPN\liked_author_search_best.json)
 rem
-rem It asks once for the TRAIN, VALIDATION and TEST csv; all three stages read those files
+rem It asks once for the TRAIN, VALIDATION and TEST csv; all stages read those files
 rem and are scored the same way (recall@20 and ndcg@20 on the rows with eval_like = 1, best
 rem epoch by validation ndcg@20).
 rem
@@ -33,8 +38,8 @@ set "DEV="
 call "%~dp0BIPN\scripts\setup_and_train_anilist.bat" setup %*
 if errorlevel 1 exit /b 1
 if not defined PYEXE goto fail_files
-rem A window large enough for the summary (25 rows) and the running stage's output.
-mode con: cols=116 lines=42 >nul 2>nul
+rem A window large enough for the summary (30 rows) and the running stage's output.
+mode con: cols=116 lines=46 >nul 2>nul
 "%PYEXE%" "%~dp0scripts\dashboard.py" --device %DEV%
 set "CODE=%errorlevel%"
 rem 0 = all stages finished, 3 = a stage failed; in both cases the screen has already waited

@@ -53,10 +53,22 @@ def log(text=''):
         f.write(text + '\n')
 
 
+def replace(tmp, path):
+    """os.replace, tried again for a few seconds: Windows refuses it while another program has the file open."""
+    for attempt in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 49:
+                raise
+            time.sleep(0.1)
+
+
 def write_json(path, content):
     with open(path + '.tmp', 'w', encoding='utf-8') as f:
         json.dump(content, f, indent=1)
-    os.replace(path + '.tmp', path)
+    replace(path + '.tmp', path)
 
 
 def read_json(path):
@@ -105,6 +117,8 @@ def show(done, total):
             rank, r['lambda'], r['layers'], r['best_epoch'],
             r['validation'][RECALL], r['validation'][NDCG], r['test'][RECALL], r['test'][NDCG]))
     log('%d of %d combinations finished (ranked by validation %s, best 10 shown).' % (len(done), total, lightgcn.SELECT))
+    log('best so far: lambda=%g layers=%d | validation %s %.4f'
+        % (rows[0]['lambda'], rows[0]['layers'], lightgcn.SELECT, rows[0]['validation'][lightgcn.SELECT]))
     return rows
 
 
@@ -115,7 +129,7 @@ def save_best(best, data, search, state=None):
         torch.save(dict(state, layers=best['layers'], **{'lambda': best['lambda']},
                         user_ids=torch.from_numpy(data['user_ids']), item_ids=torch.from_numpy(data['item_ids'])),
                    path + '.tmp')
-        os.replace(path + '.tmp', path)
+        replace(path + '.tmp', path)
     write_json(os.path.join(RESULTS, 'best_result.json'), {
         'model': 'LightGCN', 'chosen_by': 'validation ' + lightgcn.SELECT,
         'best_hyperparameters': {'lambda': best['lambda'], 'layers': best['layers']},
