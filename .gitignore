@@ -1,12 +1,12 @@
 # ---- AniList data ------------------------------------------------------------
 # interactions.csv is 11 GB, and GitHub refuses files over 100 MB. Share it with
-# teammates some other way; they put it in data/AniList/.
-# Everything else in data/AniList is made from the CSV by
+# teammates some other way; they put it in BIPN/data/AniList/.
+# Everything else in BIPN/data/AniList is made from the CSV by
 # setup_and_train_anilist.bat (same split for everyone: the seed is fixed), so
 # only the converter is kept.
-data/AniList/*
-!data/AniList/data_process.py
-data/AniList_sample/
+BIPN/data/AniList/*
+!BIPN/data/AniList/data_process.py
+BIPN/data/AniList_sample/
 
 # ---- Training output ---------------------------------------------------------
 # Saved progress and trained models, training logs, grid-search ranking.

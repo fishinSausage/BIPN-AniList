@@ -1,7 +1,7 @@
 @echo off
 rem LightGCN baseline on AniList: grid search for the best hyper-parameters. Double-click to run.
 rem   1. installs Python 3.10 and the packages, if they are missing (done by
-rem      ..\setup_and_train_anilist.bat, the same setup BIPN uses)
+rem      ..\BIPN\setup_and_train_anilist.bat, the same setup BIPN uses)
 rem   2. asks for the TRAIN csv and the VALID csv in two Explorer windows
 rem   3. keeps the rows with scaled_like = 1 (columns user_id, media_id, scaled_like)
 rem   4. trains LightGCN on the NVIDIA card for every combination of the values listed
@@ -20,12 +20,12 @@ echo ============================================================
 echo  LightGCN on AniList - grid search
 echo ============================================================
 echo.
-if not exist "%~dp0..\setup_and_train_anilist.bat" goto fail_nosetup
-findstr /c:":setup_done" "%~dp0..\setup_and_train_anilist.bat" >nul
+if not exist "%~dp0..\BIPN\setup_and_train_anilist.bat" goto fail_nosetup
+findstr /c:":setup_done" "%~dp0..\BIPN\setup_and_train_anilist.bat" >nul
 if errorlevel 1 goto fail_nosetup
 set "PYEXE="
 set "DEV="
-call "%~dp0..\setup_and_train_anilist.bat" setup %*
+call "%~dp0..\BIPN\setup_and_train_anilist.bat" setup %*
 if errorlevel 1 exit /b 1
 if not defined PYEXE goto fail_nosetup
 if not exist "%~dp0grid_search.py" goto fail_nofiles
@@ -37,9 +37,9 @@ pause
 exit /b 0
 
 :fail_nosetup
-echo ERROR: setup_and_train_anilist.bat was not found, or it is an older version
-echo without the setup mode. Keep the LightGCN folder inside the BIPN folder, next
-echo to setup_and_train_anilist.bat, and use the version uploaded with this folder.
+echo ERROR: BIPN\setup_and_train_anilist.bat was not found, or it is an older
+echo version without the setup mode. Keep the LightGCN folder next to the BIPN
+echo folder, and use the setup_and_train_anilist.bat uploaded with this folder.
 goto failed
 
 :fail_nofiles
