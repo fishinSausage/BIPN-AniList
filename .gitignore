@@ -14,6 +14,9 @@ data/AniList_sample/
 check_point/
 log/
 grid_search_results.csv
+# LightGCN baseline: its grid-search results and the preprocessed CSV data.
+LightGCN/results*/
+LightGCN/cache/
 
 # ---- Python ------------------------------------------------------------------
 __pycache__/

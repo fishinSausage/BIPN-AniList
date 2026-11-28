@@ -11,6 +11,7 @@ rem Python code in codes\, the CSV and its converter in data\AniList\.
 rem
 rem To force a PyTorch build:  setup_and_train_anilist.bat cpu   (or cu113, cu128)
 rem grid_search_hyperparams.bat runs this same file in grid-search mode.
+rem LightGCN\run_lightgcn.bat runs it in setup mode: step 1 only, then it returns.
 setlocal
 cd /d "%~dp0"
 
@@ -48,17 +49,20 @@ set "MODE=train"
 set "BUILD="
 for %%a in (%*) do (
     if /i "%%~a"=="grid" set "MODE=grid"
+    if /i "%%~a"=="setup" set "MODE=setup"
     if /i "%%~a"=="cpu" set "BUILD=cpu"
     if /i "%%~a"=="cu113" set "BUILD=cu113"
     if /i "%%~a"=="cu128" set "BUILD=cu128"
 )
+if /i "%MODE%"=="setup" goto step1
 title BIPN on AniList - %MODE%
 
 echo ============================================================
 echo  BIPN on AniList - %MODE%
 echo ============================================================
 echo.
-echo [1/3] Python and packages ...
+:step1
+if /i "%MODE%"=="setup" (echo [1/4] Python and packages ...) else (echo [1/3] Python and packages ...)
 call :find_python
 if not defined PYEXE goto need_install
 if defined BUILD goto need_install
@@ -127,6 +131,7 @@ set "DEV=cpu"
 if not errorlevel 1 set "DEV=cuda:0"
 echo       Training device: %DEV%
 if "%DEV%"=="cpu" echo       WARNING: no usable NVIDIA GPU was found. Training on the CPU is extremely slow.
+if /i "%MODE%"=="setup" goto setup_done
 
 echo.
 echo [2/3] AniList data ...
@@ -234,6 +239,12 @@ goto failed
 echo.
 pause
 exit /b 1
+
+rem Setup mode ends here: the Python path and the device go back to the .bat file
+rem that called this one (LightGCN\run_lightgcn.bat).
+:setup_done
+endlocal & set "PYEXE=%PYEXE%" & set "DEV=%DEV%"
+exit /b 0
 
 rem Sets PYEXE to a 64-bit Python 3.10, or leaves it empty if there is none.
 :find_python
